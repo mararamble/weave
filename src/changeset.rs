@@ -119,8 +119,8 @@ pub(crate) struct Change {
     deleted: Option<u64>,
     pub(crate) binary: Option<bool>,
     old_mode: Option<String>,
-    new_mode: Option<String>,
-    content_hex: Option<String>,
+    pub(crate) new_mode: Option<String>,
+    pub(crate) content_hex: Option<String>,
     pub(crate) incomplete: Option<String>,
 }
 #[derive(Clone, Serialize)]
@@ -130,11 +130,11 @@ pub(crate) struct Changeset {
     pub(crate) name: String,
     repository: String,
     pub(crate) base_commit: String,
-    head_commit: String,
+    pub(crate) head_commit: String,
     committed_changes: Vec<Change>,
-    staged_changes: Vec<Change>,
-    unstaged_changes: Vec<Change>,
-    untracked_changes: Vec<Change>,
+    pub(crate) staged_changes: Vec<Change>,
+    pub(crate) unstaged_changes: Vec<Change>,
+    pub(crate) untracked_changes: Vec<Change>,
     pub(crate) aggregate_changes: Vec<Change>,
     warnings: Vec<String>,
 }

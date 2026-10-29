@@ -363,3 +363,328 @@ fn overlaps_different_bases_report_incomplete() {
     assert_eq!(v["overlaps"][0]["region_overlap"], Value::Null);
     assert_eq!(v["overlaps"][0]["incomplete"], "different base commits");
 }
+
+#[test]
+fn plan_commits_detects_conflicts_and_preserves_sources() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    git(&p, &["init", "-b", "trunk"]);
+    git(&p, &["config", "user.name", "Test"]);
+    git(&p, &["config", "user.email", "test@example.invalid"]);
+    fs::write(p.join("file"), "original\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "base"]);
+    for name in ["one", "two"] {
+        assert!(
+            weave(&p, &root, &["new", name, "--from", "trunk"])
+                .status
+                .success()
+        );
+        let w = root.join(name);
+        fs::write(w.join("file"), format!("{name}\n")).unwrap();
+        git(&w, &["add", "file"]);
+        git(&w, &["commit", "-m", name]);
+    }
+    let one = root.join("one");
+    let two = root.join("two");
+    let indexes = [
+        fs::read(git_dir(&one).join("index")).unwrap(),
+        fs::read(git_dir(&two).join("index")).unwrap(),
+    ];
+    let refs_before = Command::new("git")
+        .current_dir(&p)
+        .args(["show-ref"])
+        .output()
+        .unwrap()
+        .stdout;
+    let result = weave(&p, &root, &["plan", "one", "two", "--json"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(value["status"], "conflict");
+    assert_eq!(value["steps"][0]["status"], "clean");
+    assert_eq!(value["steps"][1]["status"], "conflict");
+    assert_eq!(fs::read(one.join("file")).unwrap(), b"one\n");
+    assert_eq!(fs::read(two.join("file")).unwrap(), b"two\n");
+    assert_eq!(indexes[0], fs::read(git_dir(&one).join("index")).unwrap());
+    assert_eq!(indexes[1], fs::read(git_dir(&two).join("index")).unwrap());
+    assert_eq!(
+        refs_before,
+        Command::new("git")
+            .current_dir(&p)
+            .args(["show-ref"])
+            .output()
+            .unwrap()
+            .stdout
+    );
+    fs::write(two.join("dirty"), "untracked").unwrap();
+    let dirty = weave(&p, &root, &["plan", "one", "two", "--json"]);
+    assert!(
+        dirty.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dirty.stderr)
+    );
+    let dirty_value: Value = serde_json::from_slice(&dirty.stdout).unwrap();
+    assert_eq!(dirty_value["steps"][1]["untracked"], 1);
+    assert_eq!(fs::read(two.join("dirty")).unwrap(), b"untracked");
+}
+
+#[test]
+fn plan_clean_order_and_missing_workspace_failure() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    git(&p, &["init", "-b", "trunk"]);
+    git(&p, &["config", "user.name", "Test"]);
+    git(&p, &["config", "user.email", "test@example.invalid"]);
+    fs::write(p.join("base"), "base\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "base"]);
+    for name in ["one", "two"] {
+        assert!(
+            weave(&p, &root, &["new", name, "--from", "trunk"])
+                .status
+                .success()
+        );
+        let w = root.join(name);
+        fs::write(w.join(name), name).unwrap();
+        git(&w, &["add", name]);
+        git(&w, &["commit", "-m", name]);
+    }
+    let result = weave(&p, &root, &["plan", "two", "one", "--json"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let v: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(v["status"], "clean");
+    assert_eq!(v["steps"][0]["workspace"], "two");
+    assert_eq!(v["steps"][1]["workspace"], "one");
+    let failed = weave(&p, &root, &["plan", "one", "missing", "--json"]);
+    assert!(!failed.status.success());
+    assert!(failed.stdout.is_empty());
+    assert_eq!(fs::read(root.join("one/one")).unwrap(), b"one");
+}
+
+#[test]
+fn plan_includes_dirty_layers_and_rejects_incomplete_capture() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    git(&p, &["init", "-b", "trunk"]);
+    git(&p, &["config", "user.name", "Test"]);
+    git(&p, &["config", "user.email", "test@example.invalid"]);
+    fs::write(p.join("file"), "base\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "base"]);
+    for name in ["one", "two"] {
+        assert!(
+            weave(&p, &root, &["new", name, "--from", "trunk"])
+                .status
+                .success()
+        );
+    }
+    let one = root.join("one");
+    let two = root.join("two");
+    fs::write(one.join("file"), "staged\n").unwrap();
+    git(&one, &["add", "file"]);
+    fs::write(one.join("file"), "final one\n").unwrap();
+    fs::write(one.join("odd\nname"), b"new\0binary").unwrap();
+    fs::write(two.join("file"), "final two\n").unwrap();
+    let index_before = fs::read(git_dir(&one).join("index")).unwrap();
+    let result = weave(&p, &root, &["plan", "one", "two", "--json"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let v: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(v["status"], "conflict");
+    assert_eq!(v["steps"][0]["staged"], 1);
+    assert_eq!(v["steps"][0]["unstaged"], 1);
+    assert_eq!(v["steps"][0]["untracked"], 1);
+    assert_eq!(v["steps"][1]["unstaged"], 1);
+    assert_eq!(fs::read(git_dir(&one).join("index")).unwrap(), index_before);
+    assert_eq!(fs::read(one.join("file")).unwrap(), b"final one\n");
+    assert_eq!(fs::read(one.join("odd\nname")).unwrap(), b"new\0binary");
+    fs::write(two.join(".env"), "secret").unwrap();
+    let incomplete = weave(&p, &root, &["plan", "one", "two", "--json"]);
+    assert!(!incomplete.status.success());
+    assert!(incomplete.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&incomplete.stderr).contains("sensitive path excluded"));
+}
+
+#[test]
+fn plan_snapshot_tree_matches_final_dirty_contents_and_blocks_filters() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    git(&p, &["init", "-b", "trunk"]);
+    git(&p, &["config", "user.name", "Test"]);
+    git(&p, &["config", "user.email", "test@example.invalid"]);
+    fs::write(p.join("file"), "base\n").unwrap();
+    fs::write(p.join("gone"), "delete\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "base"]);
+    assert!(
+        weave(&p, &root, &["new", "one", "--from", "trunk"])
+            .status
+            .success()
+    );
+    let one = root.join("one");
+    fs::write(one.join("file"), "staged\n").unwrap();
+    git(&one, &["add", "file"]);
+    fs::write(one.join("file"), "final\n").unwrap();
+    fs::remove_file(one.join("gone")).unwrap();
+    fs::write(one.join("new file"), b"binary\0bytes").unwrap();
+    let out = weave(&p, &root, &["plan", "one", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["status"], "clean");
+    // Build the expected tree in the disposable main fixture, independently of the planner.
+    fs::write(p.join("file"), "final\n").unwrap();
+    fs::remove_file(p.join("gone")).unwrap();
+    fs::write(p.join("new file"), b"binary\0bytes").unwrap();
+    git(&p, &["add", "-A"]);
+    let expected = Command::new("git")
+        .current_dir(&p)
+        .args(["write-tree"])
+        .output()
+        .unwrap();
+    assert!(expected.status.success());
+    assert_eq!(
+        v["steps"][0]["tree"].as_str().unwrap(),
+        String::from_utf8(expected.stdout).unwrap().trim()
+    );
+    git(
+        &p,
+        &[
+            "config",
+            "filter.danger.clean",
+            "touch /tmp/weave-should-not-run",
+        ],
+    );
+    let blocked = weave(&p, &root, &["plan", "one", "--json"]);
+    assert!(!blocked.status.success());
+    assert!(blocked.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&blocked.stderr).contains("configured Git clean/process filters")
+    );
+}
+
+#[test]
+fn plan_dirty_add_add_and_hidden_index_entries() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    git(&p, &["init", "-b", "trunk"]);
+    git(&p, &["config", "user.name", "Test"]);
+    git(&p, &["config", "user.email", "test@example.invalid"]);
+    fs::write(p.join("tracked"), "base\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "base"]);
+    for name in ["one", "two"] {
+        assert!(
+            weave(&p, &root, &["new", name, "--from", "trunk"])
+                .status
+                .success()
+        );
+        fs::write(root.join(name).join("new\nfile"), format!("{name}\n")).unwrap();
+    }
+    let result = weave(&p, &root, &["plan", "one", "two", "--json"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let v: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(v["status"], "conflict");
+    assert!(
+        v["steps"][1]["conflict_details"]
+            .as_str()
+            .unwrap()
+            .contains("add/add")
+    );
+    git(
+        &root.join("one"),
+        &["update-index", "--assume-unchanged", "tracked"],
+    );
+    let result = weave(&p, &root, &["plan", "one", "two", "--json"]);
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("assume-unchanged"));
+}
+
+#[test]
+fn plan_failure_after_first_merge_does_not_publish_partial_result() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    git(&p, &["init", "-b", "trunk"]);
+    git(&p, &["config", "user.name", "Test"]);
+    git(&p, &["config", "user.email", "test@example.invalid"]);
+    fs::write(p.join("base"), "first\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "first root"]);
+    assert!(
+        weave(&p, &root, &["new", "one", "--from", "trunk"])
+            .status
+            .success()
+    );
+    git(&p, &["checkout", "--orphan", "other"]);
+    git(&p, &["rm", "-rf", "."]);
+    fs::write(p.join("other"), "second\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "second root"]);
+    assert!(
+        weave(&p, &root, &["new", "two", "--from", "other"])
+            .status
+            .success()
+    );
+    let refs = Command::new("git")
+        .current_dir(&p)
+        .args(["show-ref"])
+        .output()
+        .unwrap()
+        .stdout;
+    let index_one = fs::read(git_dir(&root.join("one")).join("index")).unwrap();
+    let index_two = fs::read(git_dir(&root.join("two")).join("index")).unwrap();
+    let result = weave(&p, &root, &["plan", "one", "two", "--json"]);
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("merge-tree failed"));
+    assert_eq!(
+        refs,
+        Command::new("git")
+            .current_dir(&p)
+            .args(["show-ref"])
+            .output()
+            .unwrap()
+            .stdout
+    );
+    assert_eq!(
+        index_one,
+        fs::read(git_dir(&root.join("one")).join("index")).unwrap()
+    );
+    assert_eq!(
+        index_two,
+        fs::read(git_dir(&root.join("two")).join("index")).unwrap()
+    );
+    assert_eq!(fs::read(root.join("one/base")).unwrap(), b"first\n");
+    assert_eq!(fs::read(root.join("two/other")).unwrap(), b"second\n");
+}

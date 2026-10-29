@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 mod changeset;
+mod integration;
 mod overlap;
 mod workspace;
 use std::{
@@ -18,6 +19,13 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
+    /// Preview ordered integration of committed workspace changes
+    Plan {
+        #[arg(long)]
+        json: bool,
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
     /// Compare changed files and source regions across workspaces
     Overlaps {
         #[arg(long)]
@@ -202,6 +210,7 @@ fn status() -> Result<Status> {
 }
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Commands::Plan { json, names } => integration::show(&names, json)?,
         Commands::Overlaps { json, names } => overlap::show(&names, json)?,
         Commands::Diff { name, stat, json } => changeset::show(&name, stat, json)?,
         Commands::New { name, from } => workspace::create(&name, &from)?,

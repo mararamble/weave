@@ -1,0 +1,9 @@
+# Step 04 — integration planner
+
+`weave plan` previews selected managed workspaces in order, using the first workspace's creation commit as target and recording each creation base and HEAD. A private Git object database and index hold synthetic snapshots and merge commits; the source object database is read through an alternate. Staged and unstaged tracked changes are represented by their final working-tree state, and captured untracked files are added to that tree. Git's merge-tree detects conflicts; processing stops at the first conflict. No source tree, index, branch or ref is deliberately changed. All selected snapshots are captured before the merge, and operational errors return no partial plan.
+
+Disposable-repository tests exercise ordered committed plans, conflicting commits and dirty changes, staged plus unstaged changes, binary untracked files, add/add collisions and unusual paths. One test independently constructs the expected dirty tree and compares its object ID. Tests also check source indexes, files and refs, incomplete sensitive file rejection, configured filter rejection, hidden index entries missing workspace failure, and an unrelated-history failure after an earlier merge step without publishing a partial result.
+
+The planner rejects unresolved indexes, skip-worktree/assume-unchanged entries, configured clean/process filters, untracked content that cannot be safely captured, and unsupported index features rather than silently producing a partial snapshot. Ignored files are excluded. Collection is not atomic; concurrency checks reduce but cannot eliminate races. Temporary tree IDs are not durable. User and repository merge configuration and custom merge drivers are not used, so results can differ from a configured merge. Snapshot and diff size limits apply. See README for the output contract.
+
+WEV-14, creating an integration branch and running validation, is separate from this read-only planner.
