@@ -19,7 +19,19 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
-    /// Preview ordered integration of committed workspace changes
+    /// Create an isolated integration branch from ordered workspaces
+    Integrate {
+        #[arg(long)]
+        branch: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(required = true)]
+        names: Vec<String>,
+        /// Optional validation command and arguments after --
+        #[arg(last = true)]
+        validation: Vec<std::ffi::OsString>,
+    },
+    /// Preview ordered integration of workspace changes
     Plan {
         #[arg(long)]
         json: bool,
@@ -210,6 +222,12 @@ fn status() -> Result<Status> {
 }
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Commands::Integrate {
+            branch,
+            json,
+            names,
+            validation,
+        } => integration::integrate(&names, &branch, &validation, json)?,
         Commands::Plan { json, names } => integration::show(&names, json)?,
         Commands::Overlaps { json, names } => overlap::show(&names, json)?,
         Commands::Diff { name, stat, json } => changeset::show(&name, stat, json)?,

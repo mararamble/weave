@@ -688,3 +688,437 @@ fn plan_failure_after_first_merge_does_not_publish_partial_result() {
     assert_eq!(fs::read(root.join("one/base")).unwrap(), b"first\n");
     assert_eq!(fs::read(root.join("two/other")).unwrap(), b"second\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn plan_rejects_same_summary_tracked_content_change_after_capture() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    git(&p, &["init", "-b", "trunk"]);
+    git(&p, &["config", "user.name", "Test"]);
+    git(&p, &["config", "user.email", "test@example.invalid"]);
+    fs::write(p.join("file"), "base\n").unwrap();
+    git(&p, &["add", "file"]);
+    git(&p, &["commit", "-m", "base"]);
+    assert!(
+        weave(&p, &root, &["new", "task", "--from", "trunk"])
+            .status
+            .success()
+    );
+    let tracked = root.join("task/file");
+    fs::write(&tracked, "alpha\n").unwrap();
+    let git_path =
+        String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout).unwrap();
+    let bin = t.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let wrapper = bin.join("git");
+    let quote = |s: &str| s.replace('\'', "'\\''");
+    let script = format!(
+        "#!/bin/sh\ncase \" $* \" in *' merge-tree '*) printf 'bravo\\n' > '{}' ;; esac\nexec '{}' \"$@\"\n",
+        quote(tracked.to_str().unwrap()),
+        quote(git_path.trim())
+    );
+    fs::write(&wrapper, script).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_weave"))
+        .current_dir(&p)
+        .args(["plan", "task", "--json"])
+        .env("PATH", &bin)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("changed during planning"));
+    assert_eq!(fs::read(&tracked).unwrap(), b"bravo\n");
+}
+
+#[test]
+fn integrate_creates_branch_from_dirty_candidate_and_runs_validation() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    git(&p, &["init", "-b", "trunk"]);
+    git(&p, &["config", "user.name", "Test"]);
+    git(&p, &["config", "user.email", "test@example.invalid"]);
+    fs::write(p.join("file"), "base\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "base"]);
+    for name in ["one", "two"] {
+        assert!(
+            weave(&p, &root, &["new", name, "--from", "trunk"])
+                .status
+                .success()
+        );
+    }
+    let one = root.join("one");
+    let two = root.join("two");
+    fs::write(one.join("file"), "committed\n").unwrap();
+    git(&one, &["add", "file"]);
+    git(&one, &["commit", "-m", "source change"]);
+    let source_head = Command::new("git")
+        .current_dir(&one)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let source_head = String::from_utf8(source_head.stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    fs::write(one.join("file"), "dirty final\n").unwrap();
+    fs::write(two.join("new"), "other workspace\n").unwrap();
+    let one_index = fs::read(git_dir(&one).join("index")).unwrap();
+    let two_index = fs::read(git_dir(&two).join("index")).unwrap();
+    let output = weave(
+        &p,
+        &root,
+        &[
+            "integrate",
+            "--branch",
+            "review/test",
+            "--json",
+            "one",
+            "two",
+            "--",
+            "true",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(v["branch"], "review/test");
+    assert_eq!(v["validation"]["exit_code"], 0);
+    assert!(
+        v["sources"][0]["included_commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x == &source_head)
+    );
+    let ancestry = Command::new("git")
+        .current_dir(&p)
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            &source_head,
+            "refs/heads/review/test",
+        ])
+        .status()
+        .unwrap();
+    assert!(ancestry.success());
+    let unchanged_head = Command::new("git")
+        .current_dir(&one)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(unchanged_head.stdout).unwrap().trim(),
+        source_head
+    );
+    let contents = Command::new("git")
+        .current_dir(&p)
+        .args(["show", "review/test:file"])
+        .output()
+        .unwrap();
+    assert!(contents.status.success());
+    assert_eq!(contents.stdout, b"dirty final\n");
+    let new_file = Command::new("git")
+        .current_dir(&p)
+        .args(["show", "review/test:new"])
+        .output()
+        .unwrap();
+    assert!(new_file.status.success());
+    assert_eq!(new_file.stdout, b"other workspace\n");
+    assert_eq!(one_index, fs::read(git_dir(&one).join("index")).unwrap());
+    assert_eq!(two_index, fs::read(git_dir(&two).join("index")).unwrap());
+    assert_eq!(fs::read(one.join("file")).unwrap(), b"dirty final\n");
+    let duplicate = weave(&p, &root, &["integrate", "--branch", "review/test", "one"]);
+    assert!(!duplicate.status.success());
+}
+
+#[test]
+fn integrate_validation_failure_and_conflicts_leave_no_branch() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    git(&p, &["init", "-b", "trunk"]);
+    git(&p, &["config", "user.name", "Test"]);
+    git(&p, &["config", "user.email", "test@example.invalid"]);
+    fs::write(p.join("file"), "base\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "base"]);
+    for name in ["one", "two"] {
+        assert!(
+            weave(&p, &root, &["new", name, "--from", "trunk"])
+                .status
+                .success()
+        );
+    }
+    fs::write(root.join("one/file"), "one\n").unwrap();
+    let fail = weave(
+        &p,
+        &root,
+        &["integrate", "--branch", "test-failed", "one", "--", "false"],
+    );
+    assert!(!fail.status.success());
+    assert!(String::from_utf8_lossy(&fail.stderr).contains("Validation failed"));
+    assert!(
+        !Command::new("git")
+            .current_dir(&p)
+            .args(["show-ref", "--verify", "--quiet", "refs/heads/test-failed"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(root.join("two/file"), "two\n").unwrap();
+    let conflict = weave(
+        &p,
+        &root,
+        &["integrate", "--branch", "test-conflict", "one", "two"],
+    );
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("conflicts"));
+    assert!(
+        !Command::new("git")
+            .current_dir(&p)
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/test-conflict"
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn integrate_reports_validation_mutation_without_including_it() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    git(&p, &["init", "-b", "trunk"]);
+    git(&p, &["config", "user.name", "Test"]);
+    git(&p, &["config", "user.email", "test@example.invalid"]);
+    fs::write(p.join("file"), "base\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "base"]);
+    assert!(
+        weave(&p, &root, &["new", "one", "--from", "trunk"])
+            .status
+            .success()
+    );
+    fs::write(root.join("one/file"), "candidate\n").unwrap();
+    let result = weave(
+        &p,
+        &root,
+        &[
+            "integrate",
+            "--branch",
+            "tested",
+            "--json",
+            "one",
+            "--",
+            "sh",
+            "-c",
+            "git rev-parse --verify HEAD >/dev/null && printf 'modified by test\\n' > file",
+        ],
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let v: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(v["validation"]["changed_tracked_files"], true);
+    let content = Command::new("git")
+        .current_dir(&p)
+        .args(["show", "tested:file"])
+        .output()
+        .unwrap();
+    assert_eq!(content.stdout, b"candidate\n");
+    assert_eq!(fs::read(root.join("one/file")).unwrap(), b"candidate\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn integrate_recovery_journal_survives_ref_update_interruption() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    git(&p, &["init", "-b", "trunk"]);
+    git(&p, &["config", "user.name", "Test"]);
+    git(&p, &["config", "user.email", "test@example.invalid"]);
+    fs::write(p.join("file"), "base\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "base"]);
+    assert!(
+        weave(&p, &root, &["new", "one", "--from", "trunk"])
+            .status
+            .success()
+    );
+    fs::write(root.join("one/file"), "changed\n").unwrap();
+    let real_git =
+        String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout).unwrap();
+    let bin = t.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let wrapper = bin.join("git");
+    let script = format!(
+        "#!/bin/sh\ncase \" $* \" in *' update-ref refs/heads/recover '*) '{}' \"$@\" || exit $?; exit 75 ;; esac\nexec '{}' \"$@\"\n",
+        real_git.trim(),
+        real_git.trim()
+    );
+    fs::write(&wrapper, script).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_weave"))
+        .current_dir(&p)
+        .args(["integrate", "--branch", "recover", "one"])
+        .env("PATH", &bin)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("recovery journal"));
+    let journals: Vec<_> = fs::read_dir(p.join(".git/weave/integrations"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(journals.len(), 1);
+    let record: Value = serde_json::from_slice(&fs::read(&journals[0]).unwrap()).unwrap();
+    let actual = Command::new("git")
+        .current_dir(&p)
+        .args(["rev-parse", "refs/heads/recover"])
+        .output()
+        .unwrap();
+    assert!(actual.status.success());
+    assert_eq!(
+        record["candidate"].as_str().unwrap(),
+        String::from_utf8(actual.stdout).unwrap().trim()
+    );
+    assert_eq!(fs::read(root.join("one/file")).unwrap(), b"changed\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn integrate_detects_source_change_during_validation() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    git(&p, &["init", "-b", "trunk"]);
+    git(&p, &["config", "user.name", "Test"]);
+    git(&p, &["config", "user.email", "test@example.invalid"]);
+    fs::write(p.join("file"), "base\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "base"]);
+    assert!(
+        weave(&p, &root, &["new", "one", "--from", "trunk"])
+            .status
+            .success()
+    );
+    let source_file = root.join("one/file");
+    fs::write(&source_file, "alpha\n").unwrap();
+    let command = format!(
+        "printf 'bravo\\n' > '{}'",
+        source_file.to_str().unwrap().replace('\'', "'\\''")
+    );
+    let result = weave(
+        &p,
+        &root,
+        &[
+            "integrate",
+            "--branch",
+            "race",
+            "one",
+            "--",
+            "sh",
+            "-c",
+            &command,
+        ],
+    );
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("changed during planning"));
+    assert!(
+        !Command::new("git")
+            .current_dir(&p)
+            .args(["show-ref", "--verify", "--quiet", "refs/heads/race"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(fs::read(source_file).unwrap(), b"bravo\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn integrate_does_not_overwrite_concurrently_created_ref() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    git(&p, &["init", "-b", "trunk"]);
+    git(&p, &["config", "user.name", "Test"]);
+    git(&p, &["config", "user.email", "test@example.invalid"]);
+    fs::write(p.join("file"), "base\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "base"]);
+    assert!(
+        weave(&p, &root, &["new", "one", "--from", "trunk"])
+            .status
+            .success()
+    );
+    fs::write(root.join("one/file"), "changed\n").unwrap();
+    let base = Command::new("git")
+        .current_dir(&p)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let base = String::from_utf8(base.stdout).unwrap().trim().to_owned();
+    let real =
+        String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout).unwrap();
+    let bin = t.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let wrapper = bin.join("git");
+    let quote = |s: &str| s.replace('\'', "'\\''");
+    let script = format!(
+        "#!/bin/sh\ncase \" $* \" in *' update-ref refs/heads/race '*) '{}' -C '{}' update-ref refs/heads/race '{}' ;; esac\nexec '{}' \"$@\"\n",
+        quote(real.trim()),
+        quote(p.to_str().unwrap()),
+        base,
+        quote(real.trim())
+    );
+    fs::write(&wrapper, script).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_weave"))
+        .current_dir(&p)
+        .args(["integrate", "--branch", "race", "one"])
+        .env("PATH", &bin)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("No existing branch was overwritten"));
+    let actual = Command::new("git")
+        .current_dir(&p)
+        .args(["rev-parse", "refs/heads/race"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(actual.stdout).unwrap().trim(), base);
+}
