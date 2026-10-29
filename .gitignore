@@ -1,0 +1,14 @@
+/target
+
+# macOS filesystem metadata
+.DS_Store
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Editor and temporary files
+*~
+*.swp
+*.swo
