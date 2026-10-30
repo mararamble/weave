@@ -7,7 +7,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 use serde_json::Value;
 use std::{
@@ -567,20 +567,24 @@ fn draw(f: &mut Frame, app: &App) {
     let content = if app.help {
         "q/Ctrl-C quit · ↑/↓ or j/k move · Tab switch pane\nEnter open workspace/file · Esc workspace pane\n/ filter workspaces · Space select for review\no overlap review · p integration preview · r refresh\nPageUp/PageDown scroll review\nReviews use selected workspaces, or all if none selected.\nThis TUI is read-only; use the CLI for mutations.".to_string()
     } else {
-        app.review
-            .lines()
-            .skip(app.review_scroll)
-            .take(cols[2].height.saturating_sub(2) as usize)
-            .map(safe)
-            .collect::<Vec<_>>()
-            .join("\n")
+        app.review.lines().map(safe).collect::<Vec<_>>().join("\n")
     };
     f.render_widget(
-        Paragraph::new(content).block(Block::default().borders(Borders::ALL).title(if app.help {
-            "Help"
-        } else {
-            "Review"
-        })),
+        Paragraph::new(content)
+            .block(Block::default().borders(Borders::ALL).title(if app.help {
+                "Help"
+            } else {
+                "Review"
+            }))
+            .wrap(Wrap { trim: false })
+            .scroll((
+                if app.help {
+                    0
+                } else {
+                    app.review_scroll.min(u16::MAX as usize) as u16
+                },
+                0,
+            )),
         cols[2],
     );
     f.render_widget(
@@ -599,6 +603,34 @@ fn draw(f: &mut Frame, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn review_wraps_and_scrolls_by_displayed_lines() {
+        let mut app = App::new();
+        app.review =
+            "start 123456789012345678901234567890123456789012345678901234567890 end".into();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 6)).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("start"));
+        assert!(!screen.contains("end"));
+        app.review_scroll = 1;
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("end"));
+        assert!(!screen.contains("start"));
+    }
     #[test]
     fn escapes_controls_and_windows_large_lists() {
         assert_eq!(safe("x\x1b\ny"), "x\\u{1b}\\ny");
