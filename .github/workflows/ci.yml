@@ -6,7 +6,9 @@ on:
 jobs:
   checks:
     strategy:
+      fail-fast: false
       matrix:
+        # Keep both libc ABI variants in the same required check matrix.
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
@@ -16,5 +18,5 @@ jobs:
           components: rustfmt, clippy
       - run: git --version
       - run: cargo fmt --check
-      - run: cargo test
+      - run: cargo test --all-targets
       - run: cargo clippy --all-targets --all-features -- -D warnings

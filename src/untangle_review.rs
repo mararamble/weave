@@ -214,6 +214,7 @@ impl App {
         self.revision += 1;
         self.detail.clear();
         self.validation = "Capture pending/incomplete".into();
+        self.message = "Capturing… Esc cancels; q quits".into();
         let flag = self.token();
         let _ = self.tx.send(Job::Capture(self.name.clone(), flag));
     }
@@ -310,7 +311,10 @@ impl App {
                                 .into();
                         self.update_detail();
                     }
-                    Err(e) => self.message = format!("Capture failed: {e:#}"),
+                    Err(e) => {
+                        self.validation = "Capture failed; no snapshot is available.".into();
+                        self.message = format!("Capture failed: {e:#}");
+                    }
                 },
                 Message::Validated(revision, result) if revision == self.revision => match result {
                     Ok(v) => {
@@ -552,8 +556,12 @@ fn draw(f: &mut Frame, app: &App) {
         )
     } else {
         format!(
-            "Vineweaver · {} · capture pending/incomplete",
-            safe(&app.name)
+            "Vineweaver · {} · {}",
+            safe(&app.name),
+            app.validation
+                .lines()
+                .next()
+                .unwrap_or("Capture pending/incomplete")
         )
     };
     f.render_widget(Paragraph::new(title).wrap(Wrap { trim: false }), rows[0]);
@@ -769,6 +777,26 @@ mod tests {
         });
         app.plan = Some(plan);
         app
+    }
+    #[test]
+    fn capture_failure_replaces_pending_state_and_message() {
+        let (tx_job, _rx_job) = mpsc::channel();
+        let (tx_message, rx_message) = mpsc::channel();
+        let mut app = App::new("mixed".into(), tx_job, rx_message);
+        app.capture();
+        tx_message
+            .send(Message::Captured(Err(anyhow::anyhow!(
+                "filters prevent inspection"
+            ))))
+            .unwrap();
+
+        app.receive();
+
+        assert_eq!(app.validation, "Capture failed; no snapshot is available.");
+        assert!(
+            app.message
+                .starts_with("Capture failed: filters prevent inspection")
+        );
     }
     #[test]
     fn keyboard_assign_move_reorder_rename_undo_and_split_boundaries() {

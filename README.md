@@ -100,13 +100,11 @@ These capabilities are part of the development roadmap and are not currently ava
 ### Build
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/mararamble/weave.git
 cd weave
 
 cargo build --release
 ```
-
-Replace the URL with your actual GitHub repository URL.
 
 ### Install locally
 
@@ -117,6 +115,28 @@ cargo install --path . --locked
 This installs the `weave` executable into Cargo's binary directory, normally `~/.cargo/bin`.
 
 Make sure that directory is available on your `PATH`.
+
+### Terminal interface
+
+Run `weave` (or `weave tui`) inside a Git worktree on an interactive terminal. Navigate with `j`/`k` or the arrow keys, change panes with `h`/`l` or Tab, and press `Enter` to open a workspace or file. `/` filters workspaces, Space marks them in the order used for planning and integration, `o` reviews overlaps, `p` previews integration, and `u` opens Vineweaver. `s` shows repository status, `w` shows the selected workspace details, and `c` reconciles worktrees. `t` shows diff statistics, `J` shows diff JSON, and `[`/`]` page through large captured patches or untracked content. `n` creates a workspace, `D` previews removal, `d` removes the selected workspace, and `i` creates an integration branch. Integration accepts an optional validation executable and its arguments, entered one at a time; these run directly without a shell; F2 adds an empty argument. These mutations require confirmation; Esc cancels. `:` opens the action palette, `?` shows shortcuts, `r` refreshes, and `q` returns to the workspace pane or exits. Integration uses workspaces in marking order, or all workspaces in listing order when none are marked. On narrow terminals the active pane fills the screen.
+
+The CLI remains available for automation and JSON. Current CLI/TUI parity audit (WEV-36):
+
+| CLI action | TUI coverage |
+|---|---|
+| [x] `status [--json]` | `s` shows the current repository status. |
+| [x] `list [--json]` | Browse and filter workspaces; `w` shows the selected record. |
+| [x] `reconcile [--json]` | `c` shows the reconciliation report. |
+| [x] `new NAME --from REF` | `n` prompts for the name and base, then confirms creation. |
+| [x] `remove NAME [--dry-run\|--yes]` | `D` previews removal; `d` confirms it and runs the same validation. |
+| [x] `diff NAME [--stat\|--json]` | Workspace files and tracked patches are browsable; captured untracked content is displayed as text or hex; `t` and `J` open statistics and JSON. Tracked patches are spooled to a temporary file and browsed in pages. Existing collector limits still apply. |
+| [x] `overlaps [--json] [NAMES...]` | `o` reviews marked workspaces, or all workspaces. |
+| [x] `plan [--json] NAMES...` | `p` previews marked workspaces in selection order, or all workspaces. |
+| [x] `integrate --branch BRANCH [--json] NAMES... [-- VALIDATION...]` | Available for marked workspaces in selection order, or all workspaces, with optional validation arguments. |
+| [x] `untangle NAME` and grouping, ordering, validation and export options | `u` opens Vineweaver for interactive assignment, ordering, validation and confirmed patch or bundle export. Snapshot identity, base and partial-export acknowledgement are handled in the session. |
+| [x] `tui` | Available via `weave` or `weave tui`. |
+
+JSON and snapshot IDs remain available in the CLI for machine consumers; the TUI presents interactive equivalents. The core has no workspace rename or shell-switch operation to expose. A local SSH pseudo-terminal smoke test covered launch, confirmed creation and exit. The diff collector retains its existing output and untracked-content limits; the pager uses temporary disk space and displays invalid UTF-8 lossily. Long-running mutations must finish before the browser exits. Filter safety checks refuse effective non-empty Git clean/process commands and report their configuration origin and key; review that configuration before retrying.
 
 ### Inspect a repository
 
@@ -229,7 +249,7 @@ Capture starts from the final workspace state relative to its recorded base, pre
 
 Every captured unit is checked to reconstruct the exact captured tree. Each named group is applied independently against the base in a temporary index/object database, then groups are applied in the requested sequence. Sequence evaluation stops at the first failure. A group that fails alone but succeeds after a prefix reports `applicable_after_prefix` and an uncertainty warning; this observation does not prove a specific dependency. For example, replacing a file with a directory can require its deletion before adding a child path. Applicability failures are warnings and exit zero; capture, stale assignment and operational errors exit nonzero without a partial JSON preview. Applicability does not establish semantic correctness. Unassigned units stay visible; `selection_complete` is false while any remain.
 
-Capture and validation compare source identities before/after capture and before/after validation. These checks are **not atomic** and cannot detect every concurrent edit. Source files, indexes, branches and refs are never written. Git output and aggregate generated patches are limited to 16 MiB, source indexes to 64 MiB; untracked files inherit the 1 MiB/file, 8 MiB total, regular-file-only and sensitive-path exclusions below. Unsupported indexes, configured clean/process filters, incomplete untracked reads and exceeded limits fail capture. Ignored files remain excluded. Private state is removed on normal completion and returned errors, including interrupted Git subprocesses. Abrupt process termination (for example SIGKILL) can leave an OS temporary directory; capture is not a persistent archive.
+Capture and validation compare source identities before/after capture and before/after validation. These checks are **not atomic** and cannot detect every concurrent edit. Source files, indexes, branches and refs are never written. Git output and aggregate generated patches are limited to 16 MiB, source indexes to 64 MiB; untracked files inherit the 1 MiB/file, 8 MiB total, regular-file-only and sensitive-path exclusions below. Unsupported indexes, effective non-empty clean/process filter commands, incomplete untracked reads and exceeded limits fail capture. Ignored files remain excluded. Private state is removed on normal completion and returned errors, including interrupted Git subprocesses. Abrupt process termination (for example SIGKILL) can leave an OS temporary directory; capture is not a persistent archive.
 
 `untangle::Engine` provides `capture`, `add_group`, `assign` (including unassignment), `verify_source`, and `validate` with typed version-1 snapshot, file, hunk, unit, group, application and diagnostic records. The engine owns the temporary object database; tree IDs cease to be locally available when it is dropped (unless independently present in the source). The UI must retain the engine, use the snapshot ID on edits, and call `verify_source` before using stale state; validation also checks automatically. Vineweaver review retains the engine in a dedicated worker, applies versioned review plans, and rejects stale validation results.
 
@@ -296,7 +316,7 @@ Disposable-repository coverage includes independent same-file groups, indivisibl
 
 Plan JSON schema version 1 contains `schema_version`, `target_base`, `status` (`clean` or `conflict`), `selected_workspaces`, ordered processed `steps`, and `warnings`. Each step records workspace, creation base, HEAD, status, staged/unstaged/untracked counts, temporary tree ID, and nullable Git conflict details. Steps after the first conflict are not evaluated. Tree IDs refer to temporary objects and are informational only; they disappear when the command exits. A conflict is a successfully computed plan and exits zero. Operational errors exit nonzero and produce no JSON plan.
 
-The final worktree state is previewed as one snapshot per workspace; staging is reported separately but intermediate index contents are not independently integrated. Ignored files are excluded. Untracked capture follows the limits and sensitive-path exclusions described in Safety and limitations below; if any selected untracked file cannot be captured, the plan fails rather than omitting it. Unmerged indexes, assume-unchanged or skip-worktree entries, unsupported index features, and configured clean/process filters are rejected. Git output is capped at 16 MiB; the copied source index is limited to 64 MiB. Collection rechecks captured content and metadata but is not atomic. Custom merge drivers and configuration are disabled in the preview, so configured merges may differ. A clean merge does not establish semantic compatibility. Plans are not persisted or replayable; `weave integrate` builds and checks a fresh candidate when it runs.
+The final worktree state is previewed as one snapshot per workspace; staging is reported separately but intermediate index contents are not independently integrated. Ignored files are excluded. Untracked capture follows the limits and sensitive-path exclusions described in Safety and limitations below; if any selected untracked file cannot be captured, the plan fails rather than omitting it. Unmerged indexes, assume-unchanged or skip-worktree entries, unsupported index features, and effective non-empty clean/process filter commands are rejected. Git output is capped at 16 MiB; the copied source index is limited to 64 MiB. Collection rechecks captured content and metadata but is not atomic. Custom merge drivers and configuration are disabled in the preview, so configured merges may differ. A clean merge does not establish semantic compatibility. Plans are not persisted or replayable; `weave integrate` builds and checks a fresh candidate when it runs.
 
 
 ## Create an integration branch
@@ -653,7 +673,7 @@ Status reads NUL-delimited Git output as bytes and rejects malformed or truncate
 
 Checks are repeated after confirmation, but concurrent external Git or filesystem changes can still race with deletion; this is not an atomic transaction. Safe removal currently requires Unix file identity checks. `status` and `list` JSON retain their version 1 contracts; `reconcile --json` is a separate version 1 diagnostic object with `managed` and `unknown` arrays. Managed entries include staged, unstaged, untracked and ignored counts; these are null when inspection is unavailable. A blocked dry-run reports the record and reason when the inventory can be read, exits nonzero and changes nothing. A worktree with filesystem data that Git status omits is reported as `untracked_or_uninspectable_filesystem_data`, not clean.
 
-Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and `rev-parse --path-format=absolute`; planning additionally requires the capabilities listed in the integration section. Weave invokes Git with argument vectors, suppresses hooks and fsmonitor per invocation, and disables external diff and text conversion where it collects diffs. These settings do not modify user configuration. Git checkout during `new` may run configured smudge or process filters, and status or diff operations may invoke configured clean filters; use trusted repositories and Git configuration. Reconciliation and removal refuse inspection when clean or process filters are configured. The integration command runs a validation command only when explicitly supplied.
+Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and `rev-parse --path-format=absolute`; planning additionally requires the capabilities listed in the integration section. Weave invokes Git with argument vectors, suppresses hooks and fsmonitor per invocation, and disables external diff and text conversion where it collects diffs. These settings do not modify user configuration. Git checkout during `new` may run configured smudge or process filters, and status or diff operations may invoke effective clean filters; use trusted repositories and Git configuration. Reconciliation and removal refuse inspection when effective clean/process filter commands are non-empty. The integration command runs a validation command only when explicitly supplied.
 
 ---
 
@@ -665,7 +685,8 @@ Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and
 | 02 | Managed worktrees, reconciliation and confirmed removal | Implemented; hosted CI and safety review pending |
 | 03 | Diff collection and overlap detection | Implemented |
 | 04 | Non-destructive integration planning and review branches | Implemented |
-| 05 | Ratatui terminal interface | Implemented; SSH verification pending |
+| 05 | Ratatui terminal interface | Implemented; local and SSH launch/create/exit smoke tests passed |
+| 05c | TUI-first parity and keyboard workflows (WEV-36) | Implemented: ordered review and integration, confirmed mutations, paged diffs, keyboard palette, narrow layouts, local and SSH smoke tests; limits documented |
 | 06 | Vineweaver Untangle engine | Implemented: snapshot-scoped hunk/whole-file assignment and isolated validation |
 | 06b | Vineweaver review and export (WEV-18) | Implemented: local TUI review, ordering/undo, verified patch and independent-commit bundle exports; SSH verification pending |
 | 07 | SSH remote linking | Planned |

@@ -15,6 +15,21 @@ fn weave(p: &Path, root: &Path, args: &[&str]) -> std::process::Output {
         .fixture_output()
         .unwrap()
 }
+fn weave_with_global_config(
+    p: &Path,
+    root: &Path,
+    args: &[&str],
+    global_config: &Path,
+) -> std::process::Output {
+    common::isolate(&mut Command::new(env!("CARGO_BIN_EXE_weave")))
+        .current_dir(p)
+        .args(args)
+        .env("WEAVE_WORKSPACE_DIR", root)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", global_config)
+        .fixture_output()
+        .unwrap()
+}
 #[test]
 fn lifecycle() {
     let temp = tempfile::tempdir().unwrap();
@@ -572,9 +587,82 @@ fn plan_snapshot_tree_matches_final_dirty_contents_and_blocks_filters() {
     let blocked = weave(&p, &root, &["plan", "one", "--json"]);
     assert!(!blocked.status.success());
     assert!(blocked.stdout.is_empty());
+    let diagnostic = String::from_utf8_lossy(&blocked.stderr);
+    assert!(diagnostic.contains("effective Git clean/process filters"));
+    assert!(diagnostic.contains("filter.danger.clean"));
+    assert!(diagnostic.contains("file:"));
+    assert!(diagnostic.contains("git config --show-origin"));
+    assert!(!diagnostic.contains("touch /tmp/weave-should-not-run"));
+}
+
+#[test]
+fn plan_uses_effective_filter_values_from_included_config() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    common::init(&p, "trunk");
+    fs::write(p.join("file"), "base\n").unwrap();
+    fs::write(p.join(".gitattributes"), "file filter=danger\n").unwrap();
+    git(&p, &["add", "."]);
+    git(&p, &["commit", "-m", "base"]);
     assert!(
-        String::from_utf8_lossy(&blocked.stderr).contains("configured Git clean/process filters")
+        weave(&p, &root, &["new", "one", "--from", "trunk"])
+            .status
+            .success()
     );
+
+    let weave_config = p.join(".git/weave-config");
+    fs::write(
+        &weave_config,
+        "[filter \"danger\"]\n\tclean =\n\tprocess =\n",
+    )
+    .unwrap();
+    let include_path = weave_config.to_string_lossy().into_owned();
+    git(&p, &["config", "--local", "include.path", &include_path]);
+    let marker = t.path().join("filter-ran");
+    let global_config = t.path().join("global.gitconfig");
+    fs::write(
+        &global_config,
+        format!(
+            "[filter \"danger\"]\n\tclean = touch {}\n\tprocess = touch {}\n",
+            marker.display(),
+            marker.display()
+        ),
+    )
+    .unwrap();
+
+    let effective = common::isolate(&mut Command::new("git"))
+        .current_dir(&p)
+        .args(["config", "--show-origin", "--get", "filter.danger.clean"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &global_config)
+        .fixture_output()
+        .unwrap();
+    assert!(effective.status.success());
+    let effective = String::from_utf8_lossy(&effective.stdout);
+    assert!(effective.contains(weave_config.to_str().unwrap()));
+    assert!(effective.ends_with("\t\n"));
+
+    fs::write(root.join("one/file"), "changed\n").unwrap();
+    let planned = weave_with_global_config(&p, &root, &["plan", "one", "--json"], &global_config);
+    assert!(
+        planned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&planned.stderr)
+    );
+    assert!(!marker.exists());
+
+    fs::write(&weave_config, "# no filter overrides\n").unwrap();
+    let blocked = weave_with_global_config(&p, &root, &["plan", "one", "--json"], &global_config);
+    assert!(!blocked.status.success());
+    let diagnostic = String::from_utf8_lossy(&blocked.stderr);
+    assert!(diagnostic.contains("effective Git clean/process filters"));
+    assert!(diagnostic.contains("filter.danger.clean"));
+    assert!(diagnostic.contains("filter.danger.process"));
+    assert!(diagnostic.contains(&global_config.to_string_lossy().to_string()));
+    assert!(!diagnostic.contains("touch"));
+    assert!(!marker.exists());
 }
 
 #[test]

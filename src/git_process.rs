@@ -147,17 +147,96 @@ pub(crate) fn command_at(path: &std::path::Path) -> Command {
     cmd
 }
 
-/// Git status may run configured clean/process filters; refuse before inspection.
+/// Git status may run active clean/process filters; refuse before inspection.
 pub(crate) fn ensure_no_filters(path: &std::path::Path) -> anyhow::Result<()> {
     use anyhow::bail;
-    let output =
-        output(command_at(path).args(["config", "--get-regexp", r"^filter\..*\.(clean|process)$"]))
-            .context("Cannot inspect Git filter configuration")?;
-    match output.status.code() {
-        Some(1) if output.stdout.is_empty() => Ok(()),
-        Some(0) => bail!("Configured clean/process filters prevent safe inspection"),
+    const FILTER_PATTERN: &str = r"^filter\..*\.(clean|process)$";
+
+    // `--get-regexp` lists every matching definition from every config source.
+    // Use that list only to discover keys, then ask Git for each key's effective
+    // value and origin. In particular, an empty local value overrides a global
+    // command and must not be treated as an active filter.
+    let keys_output = output(command_at(path).args([
+        "config",
+        "--null",
+        "--name-only",
+        "--get-regexp",
+        FILTER_PATTERN,
+    ]))
+    .context("Cannot inspect Git filter configuration")?;
+    match keys_output.status.code() {
+        Some(1) if keys_output.stdout.is_empty() => Ok(()),
+        Some(0) => {
+            let Some(configured_keys) = nul_records(&keys_output.stdout) else {
+                bail!("Cannot inspect Git filter configuration");
+            };
+            let mut keys = std::collections::BTreeSet::new();
+            for key in configured_keys {
+                let Ok(key) = std::str::from_utf8(key) else {
+                    bail!("Cannot inspect Git filter configuration");
+                };
+                if key.is_empty() {
+                    bail!("Cannot inspect Git filter configuration");
+                }
+                keys.insert(key.to_owned());
+            }
+
+            let mut active = Vec::new();
+            for key in keys {
+                let effective = output(command_at(path).args([
+                    "config",
+                    "--null",
+                    "--show-origin",
+                    "--get",
+                    key.as_str(),
+                ]))
+                .context("Cannot inspect Git filter configuration")?;
+                if effective.status.code() != Some(0) {
+                    bail!("Cannot inspect Git filter configuration");
+                }
+                let Some(fields) = nul_records(&effective.stdout) else {
+                    bail!("Cannot inspect Git filter configuration");
+                };
+                if fields.len() != 2 || fields[0].is_empty() {
+                    bail!("Cannot inspect Git filter configuration");
+                }
+                if !fields[1].is_empty() {
+                    let origin = String::from_utf8_lossy(fields[0]);
+                    active.push(format!("{origin} {key}"));
+                }
+            }
+            if active.is_empty() {
+                return Ok(());
+            }
+            let entries: String = active
+                .join("\n")
+                .chars()
+                .map(|c| {
+                    if c.is_control() && c != '\n' && c != '\t' {
+                        '?'
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            bail!(
+                "effective Git clean/process filters prevent safe inspection: {}. Inspect each effective value with `git config --show-origin --get '<key>'`; review or remove the configuration only if appropriate, then retry. Weave will not run these filters.",
+                entries
+            );
+        }
         _ => bail!("Cannot inspect Git filter configuration"),
     }
+}
+
+fn nul_records(output: &[u8]) -> Option<Vec<&[u8]>> {
+    if output.is_empty() || output.last() != Some(&0) {
+        return None;
+    }
+    let records: Vec<_> = output.split(|byte| *byte == 0).collect();
+    records
+        .last()
+        .is_some_and(|record| record.is_empty())
+        .then(|| records[..records.len() - 1].to_vec())
 }
 
 #[cfg(all(test, unix))]

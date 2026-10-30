@@ -701,12 +701,48 @@ fn vineweaver_pty_review_restores_terminal_on_quit_and_cancellation() {
         let cancel_immediately = mode == "cancel";
         let export_cancel = mode == "cancel-export";
         let (mut master_fd, mut slave_fd) = (-1, -1);
-        let mut size = libc::winsize {
+        let size = libc::winsize {
             ws_row: 35,
             ws_col: 140,
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
+        // libc's `openpty` declaration differs by target; keep both the local
+        // binding and raw pointer aligned with the pinned platform signature.
+        #[cfg(any(
+            target_vendor = "apple",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "netbsd",
+            target_os = "haiku",
+            target_os = "solaris",
+            target_os = "nto",
+            target_os = "l4re",
+            all(target_os = "linux", target_env = "uclibc"),
+        ))]
+        let mut size = size;
+        #[cfg(any(
+            target_vendor = "apple",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+            target_os = "netbsd",
+            target_os = "haiku",
+            target_os = "solaris",
+            target_os = "nto",
+            target_os = "l4re",
+            all(target_os = "linux", target_env = "uclibc"),
+        ))]
+        let size_ptr = &raw mut size;
+        #[cfg(any(
+            target_os = "android",
+            target_os = "openbsd",
+            target_os = "redox",
+            target_os = "cygwin",
+            target_os = "hurd",
+            target_os = "illumos",
+            all(target_os = "linux", not(target_env = "uclibc")),
+        ))]
+        let size_ptr = &raw const size;
         assert_eq!(
             unsafe {
                 libc::openpty(
@@ -714,8 +750,7 @@ fn vineweaver_pty_review_restores_terminal_on_quit_and_cancellation() {
                     &mut slave_fd,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    // libc exposes this as *mut on macOS and *const on Linux.
-                    &raw mut size,
+                    size_ptr,
                 )
             },
             0

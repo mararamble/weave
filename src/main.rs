@@ -25,13 +25,13 @@ use std::{
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 #[derive(Subcommand)]
 enum Commands {
     /// Capture, manually group, and validate mixed changes without modifying the workspace
     Untangle(untangle::Options),
-    /// Open the interactive, read-only workspace browser
+    /// Open the interactive workspace browser
     Tui,
     /// Create an isolated integration branch from ordered workspaces
     Integrate {
@@ -286,22 +286,23 @@ fn status() -> Result<Status> {
 }
 fn main() -> Result<()> {
     match Cli::parse().command {
-        Commands::Untangle(options) => untangle::show(options)?,
-        Commands::Tui => tui::run()?,
-        Commands::Integrate {
+        None => tui::run()?,
+        Some(Commands::Untangle(options)) => untangle::show(options)?,
+        Some(Commands::Tui) => tui::run()?,
+        Some(Commands::Integrate {
             branch,
             json,
             names,
             validation,
-        } => integration::integrate(&names, &branch, &validation, json)?,
-        Commands::Remove { name, dry_run, yes } => removal::remove(&name, dry_run, yes)?,
-        Commands::Reconcile { json } => reconcile::show(json)?,
-        Commands::Plan { json, names } => integration::show(&names, json)?,
-        Commands::Overlaps { json, names } => overlap::show(&names, json)?,
-        Commands::Diff { name, stat, json } => changeset::show(&name, stat, json)?,
-        Commands::New { name, from } => workspace::create(&name, &from)?,
-        Commands::List { json } => workspace::list(json)?,
-        Commands::Status { json } => {
+        }) => integration::integrate(&names, &branch, &validation, json)?,
+        Some(Commands::Remove { name, dry_run, yes }) => removal::remove(&name, dry_run, yes)?,
+        Some(Commands::Reconcile { json }) => reconcile::show(json)?,
+        Some(Commands::Plan { json, names }) => integration::show(&names, json)?,
+        Some(Commands::Overlaps { json, names }) => overlap::show(&names, json)?,
+        Some(Commands::Diff { name, stat, json }) => changeset::show(&name, stat, json)?,
+        Some(Commands::New { name, from }) => workspace::create(&name, &from)?,
+        Some(Commands::List { json }) => workspace::list(json)?,
+        Some(Commands::Status { json }) => {
             let s = status()?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&s)?);

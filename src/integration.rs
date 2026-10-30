@@ -280,28 +280,15 @@ pub(crate) fn checked(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
-// The existing collector runs Git against the source repository. Refuse configured
-// clean/process filters before collection because Git may invoke them while diffing.
+// The existing collector runs Git against the source repository. Refuse effective
+// clean/process commands before collection because Git may invoke them while diffing.
 fn ensure_no_external_filters(name: &str) -> Result<()> {
     let record = workspace::get(name)?;
-    let output = crate::git_process::output(
-        crate::git_process::command_at(Path::new(&record.path)).args([
-            "config",
-            "--get-regexp",
-            r"^filter\..*\.(clean|process)$",
-        ]),
-    )
-    .context("Could not inspect Git filter configuration")?;
-    match output.status.code() {
-        Some(1) => Ok(()),
-        Some(0) => bail!(
-            "Workspace {name} has configured Git clean/process filters; planning refuses to execute repository commands that may run them"
-        ),
-        _ => bail!(
-            "Cannot inspect Git filter configuration for {name}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ),
-    }
+    crate::git_process::ensure_no_filters(Path::new(&record.path)).with_context(|| {
+        format!(
+            "Workspace {name}: planning refuses to execute repository commands that may run filters"
+        )
+    })
 }
 
 struct PreparedCandidate {
