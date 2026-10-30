@@ -410,8 +410,10 @@ Keep startup responsive, limit unnecessary processing, use bounded operations, a
 By default, managed workspaces live under:
 
 ```text
-<primary-worktree-parent>/<primary-worktree-name>.weave/
+<primary-worktree-parent>/<primary-worktree-name>.weave/<task>
 ```
+
+Repositories with the same name in different parent directories have separate workspace roots. If the destination for a task already exists, creation refuses with `Destination already exists` and leaves it untouched. If the parent directory is not writable, creation fails with `Cannot create workspace root <path>: Permission denied` (the OS error detail may vary); set `WEAVE_WORKSPACE_DIR` to a writable location.
 
 Git reports the same primary anchor from linked worktrees, so they share this default. For bare repositories and separate Git directories where Git reports the common directory as the primary anchor, the default is a sibling named `<common-directory-name>.weave`. The resolved default must be outside the common directory; an unsafe or symlinked default is refused. Existing workspaces at the former `<Git common directory>/weave-workspaces/` location continue to use their recorded paths.
 
@@ -695,7 +697,7 @@ Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and
 | Phase | Focus | Status |
 |---|---|---|
 | 01 | Repository discovery | Implemented |
-| 02 | Managed worktrees, reconciliation and confirmed removal (new workspaces default outside Git metadata) | Implemented, verification pending: safety review; latest hosted CI fails on Ubuntu Clippy |
+| 02 | Managed worktrees, reconciliation and confirmed removal (new workspaces default outside Git metadata) | Implemented, verification pending: safety review; hosted CI passed for cbba825 |
 | 03 | Diff collection and overlap detection | Implemented; untracked content capture is opt-in |
 | 04 | Non-destructive integration planning and review branches | Implemented; untracked content requires opt-in; validation uses a minimal environment but is not sandboxed |
 | 05 | Ratatui terminal interface | Implemented; local and SSH launch/create/exit smoke tests passed |

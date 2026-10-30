@@ -174,3 +174,48 @@ fn unsafe_default_symlink_is_refused_without_creating_task_or_record() {
     assert!(!repo.join(".git/danger").exists());
     assert!(!repo.join(".git/weave/danger.json").exists());
 }
+
+#[test]
+fn same_named_repositories_have_distinct_roots_and_existing_tasks_are_not_overwritten() {
+    let temp = tempfile::tempdir().unwrap();
+    let a = temp.path().join("a");
+    let b = temp.path().join("b");
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&b).unwrap();
+    let first = repo(&a);
+    let second = repo(&b);
+    ok(run(&first, &["new", "task", "--from", "main"], None));
+    ok(run(&second, &["new", "task", "--from", "main"], None));
+    assert!(a.join("repo.weave/task/file").exists());
+    assert!(b.join("repo.weave/task/file").exists());
+    let occupied = a.join("repo.weave/taken");
+    fs::create_dir(&occupied).unwrap();
+    fs::write(occupied.join("keep"), "preserve").unwrap();
+    let result = run(&first, &["new", "taken", "--from", "main"], None);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Destination already exists"));
+    assert_eq!(
+        fs::read_to_string(occupied.join("keep")).unwrap(),
+        "preserve"
+    );
+    assert!(!first.join(".git/weave/taken.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn default_root_reports_unwritable_parent() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let parent = temp.path().join("locked");
+    fs::create_dir(&parent).unwrap();
+    let repo = repo(&parent);
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = run(&repo, &["new", "task", "--from", "main"], None);
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(error.contains("Cannot create workspace root"), "{error}");
+    assert!(error.contains("Permission denied"), "{error}");
+    assert!(!parent.join("repo.weave/task").exists());
+    assert!(!repo.join(".git/weave/task.json").exists());
+}
