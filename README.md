@@ -580,7 +580,7 @@ Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and
 | 02 | Managed worktrees, reconciliation and confirmed removal | Implemented; hosted CI and safety review pending |
 | 03 | Diff collection and overlap detection | Implemented |
 | 04 | Non-destructive integration planning and review branches | Implemented |
-| 05 | Ratatui terminal interface | In progress; implementation and verification incomplete |
+| 05 | Ratatui terminal interface | Implemented; SSH verification pending |
 | 06 | Mixed-diff Untangle engine | Planned |
 | 07 | SSH remote linking | Planned |
 | 08 | Remote uncommitted snapshots | Planned |
