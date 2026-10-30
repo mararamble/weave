@@ -8,7 +8,9 @@ Run multiple agents against the same repository, keep their changes independent,
 
 Built in Rust. Terminal-first. Agent-agnostic.
 
-> **Project status: Pre-alpha.** Local worktree management, diff inspection, overlap detection, non-destructive integration planning, and Vineweaver Untangle review/export are implemented. Remote synchronization is planned.
+> **Project status: Pre-alpha.** Local worktree management, diff inspection, overlap detection, non-destructive integration planning, and the `weave untangle` workflow are implemented. Remote synchronization is planned.
+
+**Naming:** Weave is the tool; `weave untangle` is the action, powered by the Vineweaver engine and interactive review.
 
 ## Why Weave?
 
@@ -66,18 +68,18 @@ Preview ordered workspace changes with Git merge analysis in temporary state, pr
 
 Create a separate review branch from selected workspaces and optionally run an explicitly supplied validation command in a disposable checkout.
 
-**Vineweaver Untangle review and export**
+**Untangle review and export**
 
 Capture a mixed workspace into byte-preserving patch units, assign separate same-file hunks to named groups, and validate each group and an ordered sequence without modifying the source. Review assignments interactively and explicitly export ordered patches or portable independent commits. Ownership remains unknown.
 
 **Structured output**
 
-Machine-readable JSON is available for repository status, workspace listing, reconciliation, diff inspection, overlap analysis, integration planning, integration results, and Untangle previews.
+Machine-readable JSON is available for repository status, workspace listing, reconciliation, diff inspection, overlap analysis, integration planning, integration results, and `weave untangle` previews.
 
 ### Planned
 
 - **Integration enhancements:** Persistent, replayable plans and richer recovery and validation workflows.
-- **Vineweaver enhancements:** Saved review-session loading and finer splitting beyond existing safe Git hunk boundaries.
+- **Vineweaver engine and review enhancements:** Saved review-session loading and finer splitting beyond existing safe Git hunk boundaries.
 - **Remote Link:** Retrieve committed and uncommitted changes from other machines over SSH.
 - **Distributed integration:** Combine and validate changesets originating from multiple machines.
 - **Terminal UI:** A keyboard-first interface built with Ratatui.
@@ -118,7 +120,7 @@ Make sure that directory is available on your `PATH`.
 
 ### Terminal interface
 
-Run `weave` (or `weave tui`) inside a Git worktree on an interactive terminal. To opt in to untracked content capture for the session, run `weave tui --include-untracked-content`; this also applies to planning, integration and Vineweaver. Navigate with `j`/`k` or the arrow keys, change panes with `h`/`l` or Tab, and press `Enter` to open a workspace or file. `/` filters workspaces, Space marks them in the order used for planning and integration, `o` reviews overlaps, `p` previews integration, and `u` opens Vineweaver. `s` shows repository status, `w` shows the selected workspace details, and `c` reconciles worktrees. `t` shows diff statistics, `J` shows diff JSON, and `[`/`]` page through large captured patches or untracked content. `n` creates a workspace, `D` previews removal, `d` removes the selected workspace, and `i` creates an integration branch. Integration accepts an optional validation executable and its arguments, entered one at a time; these run directly without a shell; F2 adds an empty argument. These mutations require confirmation; Esc cancels. `:` opens the action palette, `?` shows shortcuts, `r` refreshes, and `q` returns to the workspace pane or exits. Integration uses workspaces in marking order, or all workspaces in listing order when none are marked. On narrow terminals the active pane fills the screen.
+Run `weave` (or `weave tui`) inside a Git worktree on an interactive terminal. To opt in to untracked content capture for the session, run `weave tui --include-untracked-content`; this also applies to planning, integration and Vineweaver review. Navigate with `j`/`k` or the arrow keys, change panes with `h`/`l` or Tab, and press `Enter` to open a workspace or file. `/` filters workspaces, Space marks them in the order used for planning and integration, `o` reviews overlaps, `p` previews integration, and `u` opens Vineweaver. `s` shows repository status, `w` shows the selected workspace details, and `c` reconciles worktrees. `t` shows diff statistics, `J` shows diff JSON, and `[`/`]` page through large captured patches or untracked content. `n` creates a workspace, `D` previews removal, `d` removes the selected workspace, and `i` creates an integration branch. Integration accepts an optional validation executable and its arguments, entered one at a time; these run directly without a shell; F2 adds an empty argument. These mutations require confirmation; Esc cancels. `:` opens the action palette, `?` shows shortcuts, `r` refreshes, and `q` returns to the workspace pane or exits. Integration uses workspaces in marking order, or all workspaces in listing order when none are marked. On narrow terminals the active pane fills the screen.
 
 The CLI remains available for automation and JSON. Current CLI/TUI parity audit (WEV-36):
 
@@ -229,7 +231,7 @@ Weave identifies files modified by multiple workspaces and, when analysis is sup
 
 ---
 
-## Vineweaver Untangle grouping, review and export
+## Untangle grouping, review and export
 
 ```bash
 weave untangle auth --json
@@ -241,7 +243,7 @@ weave untangle auth --snapshot SNAPSHOT_ID \
 # Optional: --unassign UNIT_ID_1 (processed after assignments)
 ```
 
-If a workspace has untracked files, Untangle refuses capture unless `--include-untracked-content` is explicitly supplied on every invocation. Opted-in untracked bytes can appear in snapshot JSON, patches and portable bundles; exclusions below still apply.
+If a workspace has untracked files, `weave untangle` and Vineweaver review refuse capture unless `--include-untracked-content` is explicitly supplied on every invocation. Opted-in untracked bytes can appear in snapshot JSON, patches and portable bundles; exclusions below still apply.
 
 `weave untangle NAME` prints a read-only preview with unit IDs, hunk ranges, group assignments, unassigned count, applicability, and warnings. JSON version 1 includes `snapshot`, `groups`, `unassigned`, `selection_complete`, `sequence_applicable`, `applications`, and typed `warnings`. The versioned snapshot contains the recorded base commit, captured tree identity, completeness, existing changeset context (committed/staged/unstaged/untracked), files and units. Units contain exact `path_hex` and `patch_hex`, a display path, a hunk range where applicable, and `ownership: "unknown"`. The final diff establishes no authorship.
 
@@ -298,7 +300,7 @@ weave untangle auth --snapshot SNAPSHOT_ID --base BASE_COMMIT \
 
 Every export contains numbered **ordered** patches, `aggregate.patch`, `manifest.json`, `validation.json`, and `review-plan.json`. The manifest records the source identity, base, order, independent applicability, captured/selected tree identities, completeness and unknown ownership. `validation.json` retains exact engine warnings and the reconstruction comparison; `review-plan.json` is an audit record, with no session-loading command yet. Numbered patches are regenerated against successive trees and independently re-applied for verification. With a complete selection, the final tree must exactly match the captured aggregate or export fails. With a partial selection, the manifest explicitly reports the omitted units and partial reconstruction. A sequence that fails Git application cannot be exported.
 
-Apply numbered patches in manifest order, or apply `aggregate.patch` once, against the recorded base. A dependent group can be exported in an applicable patch sequence; its manifest entry has `independent: false`. Commit export requires **every** group to apply independently and creates `commits.bundle` containing `refs/heads/vineweaver-0001`, etc. Each synthetic commit has the recorded base as its parent; these commits are sibling alternatives, not a linear history. The commit message identifies Vineweaver; author/committer use the synthetic Weave Preview identity and make no original-authorship claim. The manifest's entry tree is the ordered reconstruction tree; its commit ID refers to the independent commit. The portable bundle includes the base history and may be much larger than the patch budget. It is verified before publication and can be imported without access to the source repository:
+Apply numbered patches in manifest order, or apply `aggregate.patch` once, against the recorded base. A dependent group can be exported in an applicable patch sequence; its manifest entry has `independent: false`. Commit export requires **every** group to apply independently and creates `commits.bundle` containing `refs/heads/vineweaver-0001`, etc. Each synthetic commit has the recorded base as its parent; these commits are sibling alternatives, not a linear history. The commit message identifies the Untangle group; author/committer use the synthetic Weave Preview identity and make no original-authorship claim. The manifest's entry tree is the ordered reconstruction tree; its commit ID refers to the independent commit. The portable bundle includes the base history and may be much larger than the patch budget. It is verified before publication and can be imported without access to the source repository:
 
 ```bash
 git init imported-review
@@ -598,7 +600,7 @@ Weave is still pre-alpha software. Avoid relying on it as the only record of val
 
 ### Untracked file capture
 
-Ignored files are excluded. By default, `diff` and `overlaps` report untracked paths without reading contents. `plan`, `integrate`, and `untangle` refuse workspaces with untracked files rather than omit them; pass `--include-untracked-content` to opt in to capture. Use the same flag on each Untangle invocation or start `weave tui --include-untracked-content` for an interactive session. Captured content can be displayed, written to integration commits, and included in Untangle patches or bundles.
+Ignored files are excluded. By default, `diff` and `overlaps` report untracked paths without reading contents. `plan`, `integrate`, and `untangle` refuse workspaces with untracked files rather than omit them; pass `--include-untracked-content` to opt in to capture. Use the same flag on each `weave untangle` invocation or start `weave tui --include-untracked-content` for an interactive session. Captured content can be displayed, written to integration commits, and included in Untangle patches or bundles.
 
 Untracked reads exclude sensitive filenames and directories including:
 
@@ -702,8 +704,8 @@ Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and
 | 04 | Non-destructive integration planning and review branches | Implemented; untracked content requires opt-in; validation uses a minimal environment but is not sandboxed |
 | 05 | Ratatui terminal interface | Implemented; local and SSH launch/create/exit smoke tests passed |
 | 05c | TUI-first parity and keyboard workflows (WEV-36) | Implemented: ordered review and integration, confirmed mutations, paged diffs, keyboard palette, narrow layouts, local and SSH smoke tests; limits documented |
-| 06 | Vineweaver Untangle engine | Implemented: snapshot-scoped hunk/whole-file assignment and isolated validation; untracked content requires opt-in |
-| 06b | Vineweaver review and export (WEV-18) | Implemented, SSH verification pending: local TUI review, ordering/undo, verified patch and independent-commit bundle exports |
+| 06 | Vineweaver engine | Implemented: snapshot-scoped hunk/whole-file assignment and isolated validation; untracked content requires opt-in |
+| 06b | Vineweaver review and Untangle export (WEV-18) | Implemented, SSH verification pending: local TUI review, ordering/undo, verified patch and independent-commit bundle exports |
 | 07 | SSH remote linking | Planned |
 | 08 | Remote uncommitted snapshots | Planned |
 | 09 | Distributed integration | Planned |

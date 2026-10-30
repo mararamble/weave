@@ -29,7 +29,7 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
-    /// Capture, manually group, and validate mixed changes without modifying the workspace
+    /// Untangle a workspace by grouping and validating changes without modifying it
     Untangle(untangle::Options),
     /// Open the interactive workspace browser
     Tui {

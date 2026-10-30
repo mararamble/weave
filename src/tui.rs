@@ -1273,7 +1273,7 @@ fn draw(f: &mut Frame, app: &App) {
             }
         }
     } else if app.help {
-        "q back/quit · Ctrl-C quit · ↑/↓ or j/k move · h/l or Tab switch pane\nEnter open workspace/file · Esc workspace pane\n/ filter workspaces · Space mark in integration order\nn new workspace · D removal preview · d remove · i integrate\ns repository status · w workspace details · c reconcile · : action palette\no overlap review · p integration preview · r refresh\nt diff statistics · J diff JSON · [ / ] diff page\nu open selected workspace in Vineweaver Untangle review\nPageUp/PageDown scroll review\nReviews and integration use marks in order, or all if none marked.".to_string()
+        "q back/quit · Ctrl-C quit · ↑/↓ or j/k move · h/l or Tab switch pane\nEnter open workspace/file · Esc workspace pane\n/ filter workspaces · Space mark in integration order\nn new workspace · D removal preview · d remove · i integrate\ns repository status · w workspace details · c reconcile · : action palette\no overlap review · p integration preview · r refresh\nt diff statistics · J diff JSON · [ / ] diff page\nu open selected workspace in Vineweaver review\nPageUp/PageDown scroll review\nReviews and integration use marks in order, or all if none marked.".to_string()
     } else {
         app.review.lines().map(safe).collect::<Vec<_>>().join("\n")
     };
@@ -1308,7 +1308,7 @@ fn draw(f: &mut Frame, app: &App) {
             if app.editing {
                 "Filter: type, Enter to finish"
             } else {
-                "? help  n new  d remove  i integrate  s status  c reconcile  / filter  o overlaps  p preview  u Untangle  q back/quit"
+                "? help  n new  d remove  i integrate  s status  c reconcile  / filter  o overlaps  p preview  u Vineweaver  q back/quit"
             }
         )),
         rows[1],
@@ -1317,6 +1317,30 @@ fn draw(f: &mut Frame, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn review_help_and_shortcut_use_vineweaver() {
+        let mut app = App::new();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(180, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("u Vineweaver"));
+        app.help = true;
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("u open selected workspace in Vineweaver review"));
+    }
     #[test]
     fn marks_preserve_user_order_and_confirmation_uses_exact_argv() {
         let mut app = App::new();

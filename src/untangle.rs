@@ -631,7 +631,7 @@ pub(crate) fn show(options: Options) -> Result<()> {
         if options.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
-            println!("Vineweaver export: {}", destination.display());
+            println!("Untangle export: {}", destination.display());
         }
         return Ok(());
     }

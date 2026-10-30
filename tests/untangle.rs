@@ -907,3 +907,225 @@ fn vineweaver_pty_review_restores_terminal_on_quit_and_cancellation() {
         assert_eq!(source(&f), before);
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn untangle_terminology_and_external_identifiers_are_preserved() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    f.edit();
+    let help = Command::new(env!("CARGO_BIN_EXE_weave"))
+        .arg("--help")
+        .fixture_output()
+        .unwrap();
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Untangle a workspace by grouping"));
+    let help = f.run(&["untangle", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    for flag in [
+        "--include-untracked-content",
+        "--review",
+        "--export-patches",
+        "--export-commits",
+        "--base",
+        "--allow-partial",
+        "--json",
+        "--snapshot",
+        "--group",
+        "--assign",
+        "--unassign",
+        "--order",
+    ] {
+        assert!(help.contains(flag), "missing {flag}: {help}");
+    }
+    assert!(!f.run(&["vineweaver", "--help"]).status.success());
+
+    let preview = f.capture();
+    assert_eq!(preview["schema_version"], 1);
+    common::assert_fields(
+        &preview,
+        &[
+            "schema_version",
+            "snapshot",
+            "groups",
+            "unassigned",
+            "selection_complete",
+            "sequence_applicable",
+            "applications",
+            "warnings",
+        ],
+    );
+    let snapshot = &preview["snapshot"];
+    assert_eq!(snapshot["schema_version"], 1);
+    common::assert_fields(
+        snapshot,
+        &[
+            "schema_version",
+            "id",
+            "base_commit",
+            "captured_tree",
+            "complete",
+            "context",
+            "files",
+            "units",
+        ],
+    );
+    for unit in snapshot["units"].as_array().unwrap() {
+        common::assert_fields(
+            unit,
+            &[
+                "id",
+                "path",
+                "path_hex",
+                "kind",
+                "hunk",
+                "ownership",
+                "group",
+                "patch_hex",
+            ],
+        );
+        assert_eq!(unit["ownership"], "unknown");
+    }
+    let a = format!("{}=one", snapshot["units"][0]["id"].as_str().unwrap());
+    let b = format!("{}=two", snapshot["units"][1]["id"].as_str().unwrap());
+    let destination = f._temp.path().join("export");
+    let marker = f._temp.path().join("staging-path");
+    let real = Command::new("which").arg("git").output().unwrap();
+    assert!(real.status.success());
+    let real = String::from_utf8(real.stdout).unwrap();
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let bin = f._temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let wrapper = bin.join("git");
+    fs::write(&wrapper, format!(r#"#!/bin/sh
+case " $* " in
+ *' bundle create '*) for arg in "$@"; do case "$arg" in *"/.vineweaver-export-"*/commits.bundle) printf '%s\n' "$arg" > {};; esac; done;;
+esac
+exec {} "$@"
+"#, quote(marker.to_str().unwrap()), quote(real.trim()))).unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_weave"));
+    let output = common::isolate(&mut command)
+        .current_dir(&f.repo)
+        .env("WEAVE_WORKSPACE_DIR", &f.root)
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .args(export_args(
+            &preview,
+            &a,
+            &b,
+            "--export-commits",
+            destination.to_str().unwrap(),
+        ))
+        .fixture_output()
+        .unwrap();
+    let manifest = json(output);
+    assert_eq!(manifest["schema_version"], 1);
+    common::assert_fields(
+        &manifest,
+        &[
+            "schema_version",
+            "engine",
+            "kind",
+            "snapshot_id",
+            "base",
+            "captured_tree",
+            "reconstructed_tree",
+            "complete_reconstruction",
+            "ownership",
+            "entries",
+            "unassigned",
+            "warnings",
+        ],
+    );
+    assert_eq!(manifest["engine"], "vineweaver");
+    assert_eq!(manifest["kind"], "commits");
+    assert_eq!(manifest["ownership"], "unknown");
+    assert!(manifest["warnings"].as_array().unwrap().iter().any(|v| v == "Capture checks are non-atomic. Commit metadata identifies Vineweaver's synthetic export, not original authors."));
+    let staging = fs::read_to_string(marker).unwrap();
+    assert!(staging.contains("/.vineweaver-export-"));
+    assert!(staging.trim_end().ends_with("/commits.bundle"));
+    let mut files: Vec<_> = fs::read_dir(&destination)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        [
+            "0001.patch",
+            "0002.patch",
+            "aggregate.patch",
+            "commits.bundle",
+            "manifest.json",
+            "review-plan.json",
+            "validation.json"
+        ]
+    );
+    for name in ["manifest.json", "review-plan.json", "validation.json"] {
+        let data: Value =
+            serde_json::from_slice(&fs::read(destination.join(name)).unwrap()).unwrap();
+        assert_eq!(data["schema_version"], 1, "{name}");
+    }
+    let heads = git_out(
+        &f.repo,
+        &[
+            "bundle",
+            "list-heads",
+            destination.join("commits.bundle").to_str().unwrap(),
+        ],
+    );
+    let heads = String::from_utf8(heads).unwrap();
+    assert!(
+        heads
+            .lines()
+            .any(|l| l.ends_with(" refs/heads/vineweaver-0001"))
+    );
+    assert!(
+        heads
+            .lines()
+            .any(|l| l.ends_with(" refs/heads/vineweaver-0002"))
+    );
+    let portable = f._temp.path().join("portable-contract");
+    fs::create_dir(&portable).unwrap();
+    common::init(&portable, "main");
+    common::git(
+        &portable,
+        &[
+            "fetch",
+            destination.join("commits.bundle").to_str().unwrap(),
+            "refs/heads/vineweaver-0001:refs/heads/one",
+        ],
+    );
+    let commit = git_out(
+        &portable,
+        &["log", "-1", "--format=%an <%ae>|%cn <%ce>|%s", "one"],
+    );
+    let commit = String::from_utf8(commit).unwrap();
+    assert_eq!(
+        commit.trim(),
+        "Weave Preview <preview@weave.invalid>|Weave Preview <preview@weave.invalid>|Untangle group one (Vineweaver synthetic export)"
+    );
+    assert!(commit.contains("Vineweaver"));
+
+    let second = f._temp.path().join("human-output");
+    let mut args = export_args(
+        &preview,
+        &a,
+        &b,
+        "--export-patches",
+        second.to_str().unwrap(),
+    );
+    args.retain(|arg| *arg != "--json");
+    let human = f.run(&args);
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(String::from_utf8_lossy(&human.stdout).starts_with("Untangle export: "));
+}

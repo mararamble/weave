@@ -1,4 +1,4 @@
-//! Vineweaver exports publish only a new directory. No source refs are updated.
+//! Untangle exports publish only a new directory. No source refs are updated.
 use crate::{integration as git, untangle::Engine};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -298,7 +298,7 @@ pub(crate) fn export(
                         base,
                         "-m",
                         &format!(
-                            "Vineweaver group: {}\n\nOriginal ownership unknown.",
+                            "Untangle group {} (Vineweaver synthetic export)\n\nOriginal ownership unknown.",
                             group.name
                         ),
                     ],
