@@ -38,7 +38,7 @@ fn run_with(
     worktree: Option<&Path>,
     input: Option<&[u8]>,
 ) -> Result<Output> {
-    let mut command = Command::new("git");
+    let mut command = crate::git_process::command();
     command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -69,8 +69,7 @@ fn run_with(
     } else {
         Stdio::null()
     });
-    let mut child = command
-        .spawn()
+    let mut child = crate::git_process::spawn(&mut command)
         .context("Could not run Git for integration preview")?;
     let writer = input.map(|bytes| {
         let mut stdin = child.stdin.take().expect("piped stdin");
@@ -154,12 +153,9 @@ fn decode_hex(value: &str) -> Result<Vec<u8>> {
 fn snapshot(dir: &Path, s: &changeset::Changeset) -> Result<String> {
     let record = workspace::get(&s.name)?;
     let worktree = Path::new(&record.path);
-    let output = Command::new("git")
-        .args(["-C"])
-        .arg(worktree)
-        .args(["rev-parse", "--absolute-git-dir"])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()?;
+    let output = crate::git_process::output(
+        crate::git_process::command_at(worktree).args(["rev-parse", "--absolute-git-dir"]),
+    )?;
     if !output.status.success() {
         bail!("Cannot locate workspace index for {}", s.name);
     }
@@ -174,7 +170,7 @@ fn snapshot(dir: &Path, s: &changeset::Changeset) -> Result<String> {
         bail!("Workspace {} has unresolved index conflicts", s.name);
     }
     let flags = check_output(run(dir, &["ls-files", "-v", "-z"])?)?;
-    for entry in flags.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+    for entry in changeset::parse_path_list(&flags)? {
         if entry.len() < 3 || entry[1] != b' ' {
             bail!("Invalid Git index listing");
         }
@@ -183,6 +179,9 @@ fn snapshot(dir: &Path, s: &changeset::Changeset) -> Result<String> {
                 "Workspace {} has skip-worktree or assume-unchanged entries; planning cannot safely capture them",
                 s.name
             );
+        }
+        if !matches!(entry[0], b'H' | b'M' | b'R' | b'C' | b'K' | b'U') {
+            bail!("Invalid Git index listing");
         }
     }
     let args = [
@@ -275,13 +274,14 @@ fn checked(dir: &Path, args: &[&str]) -> Result<String> {
 // clean/process filters before collection because Git may invoke them while diffing.
 fn ensure_no_external_filters(name: &str) -> Result<()> {
     let record = workspace::get(name)?;
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&record.path)
-        .args(["config", "--get-regexp", r"^filter\..*\.(clean|process)$"])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .context("Could not inspect Git filter configuration")?;
+    let output = crate::git_process::output(
+        crate::git_process::command_at(Path::new(&record.path)).args([
+            "config",
+            "--get-regexp",
+            r"^filter\..*\.(clean|process)$",
+        ]),
+    )
+    .context("Could not inspect Git filter configuration")?;
     match output.status.code() {
         Some(1) => Ok(()),
         Some(0) => bail!(

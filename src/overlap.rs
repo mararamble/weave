@@ -4,12 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use std::{
-    ffi::OsString,
-    io::Read,
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{ffi::OsString, path::Path};
 
 #[derive(Serialize)]
 struct Region {
@@ -51,49 +46,30 @@ fn path_arg(hex: &str) -> Result<OsString> {
     }
 }
 fn patch(path: &Path, base: &str, file: &str) -> Result<Vec<u8>> {
-    let mut child = Command::new("git")
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-C",
-        ])
-        .arg(path)
-        .args([
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            "--no-renames",
-            "--no-indent-heuristic",
-            "--unified=0",
-            base,
-            "--",
-        ])
-        .arg(path_arg(file)?)
-        .env("GIT_LITERAL_PATHSPECS", "1")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("Could not run Git")?;
-    let mut out = Vec::new();
-    child
-        .stdout
-        .take()
-        .context("Missing Git output")?
-        .take(16 * 1024 * 1024 + 1)
-        .read_to_end(&mut out)?;
-    if out.len() > 16 * 1024 * 1024 {
-        let _ = child.kill();
-        let _ = child.wait();
-        bail!("Diff exceeds size limit");
+    let output = crate::git_process::bounded_output(
+        crate::git_process::command_at(path)
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--no-renames",
+                "--no-indent-heuristic",
+                "--unified=0",
+                base,
+                "--",
+            ])
+            .arg(path_arg(file)?)
+            .env("GIT_LITERAL_PATHSPECS", "1"),
+        16 * 1024 * 1024,
+    )?;
+    if !output.status.success() {
+        bail!(
+            "Git could not inspect file regions: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
-    if !child.wait()?.success() {
-        bail!("Git could not inspect file regions");
-    }
-    Ok(out)
+    Ok(output.stdout)
 }
 fn regions(data: &[u8]) -> Result<Vec<Region>> {
     let mut result = Vec::new();

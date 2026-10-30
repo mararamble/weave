@@ -40,6 +40,10 @@ Create independent Git worktrees for different tasks or agents. Each workspace h
 
 Inspect repository metadata, branch state, Git directories, and staged, unstaged, and untracked changes.
 
+**Worktree reconciliation and removal**
+
+Inspect managed and unknown worktrees, and preview or explicitly confirm removal of an eligible clean managed worktree. Removal retains its branch and refuses unsafe or uncertain states.
+
 **Changeset inspection**
 
 Examine changes relative to a workspace's original base commit.
@@ -64,7 +68,7 @@ Create a separate review branch from selected workspaces and optionally run an e
 
 **Structured output**
 
-Machine-readable JSON is available for repository status, workspace listing, diff inspection, overlap analysis, integration planning, and integration results.
+Machine-readable JSON is available for repository status, workspace listing, reconciliation, diff inspection, overlap analysis, integration planning, and integration results.
 
 ### Planned
 
@@ -549,12 +553,31 @@ Missing workspaces and failed Git operations produce errors instead of partial s
 
 ---
 
+
+## Development checks
+
+CI uses the current stable Rust toolchain on Linux and macOS; the crate uses Rust edition 2024. Run `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings` from this directory. Tests use disposable repositories and explicit branch names. Some macOS filesystems reject non-UTF-8 filenames, so the filesystem-specific test skips when the OS reports that limitation; byte-level parser coverage still runs.
+
+Status reads NUL-delimited Git output as bytes and rejects malformed or truncated records. On Unix, repository paths can contain non-UTF-8 bytes, with lossy display indicated by `paths_lossy`; managed workspace metadata still requires UTF-8 paths. Other platforms use lossy conversion for Git paths. Git requirements for integration planning are described above; other Git capability and helper-execution safeguards are still being audited.
+
+## Worktree reconciliation and removal
+
+`weave reconcile` (or `--json`) inspects Weave records alongside Git's worktree registrations. It reports missing or unregistered paths, possible moved candidates, branch or metadata drift, locks, and dirty or ignored contents. It also lists registrations whose identity could not be verified against a record; these are never cleanup targets. Possible moves are diagnostics, not proof of ownership. Invalid metadata or Git output can stop inspection; a failed inspection is not a clean result. Reconciliation is read-only.
+
+`weave remove TASK --dry-run` checks a selected managed workspace and previews the path, branch and metadata operations. `weave remove TASK` requires an interactive `yes`; automation must specify `--yes` for that exact task. The branch is retained. Removal refuses pending, missing, moved, locked, primary, detached, drifted, ambiguous, dirty or ignored workspaces, untracked filesystem entries (including empty directories and nested Git data), submodules, hidden index entries, and paths that cannot be safely inspected. It uses Git's non-force removal and deletes the record only after Git succeeds. Stale records and unknown registrations are left for manual investigation. If Git removal succeeds but metadata deletion fails, inspect the printed record and Git registration before manually removing that record; do not remove any workspace directory as a recovery shortcut.
+
+Checks are repeated after confirmation, but concurrent external Git or filesystem changes can still race with deletion; this is not an atomic transaction. Safe removal currently requires Unix file identity checks. `status` and `list` JSON retain their version 1 contracts; `reconcile --json` is a separate version 1 diagnostic object with `managed` and `unknown` arrays. Managed entries include staged, unstaged, untracked and ignored counts; these are null when inspection is unavailable. A blocked dry-run reports the record and reason when the inventory can be read, exits nonzero and changes nothing. A worktree with filesystem data that Git status omits is reported as `untracked_or_uninspectable_filesystem_data`, not clean.
+
+Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and `rev-parse --path-format=absolute`; planning additionally requires the capabilities listed in the integration section. Weave invokes Git with argument vectors, suppresses hooks and fsmonitor per invocation, and disables external diff and text conversion where it collects diffs. These settings do not modify user configuration. Git checkout during `new` may run configured smudge or process filters, and status or diff operations may invoke configured clean filters; use trusted repositories and Git configuration. Reconciliation and removal refuse inspection when clean or process filters are configured. The integration command runs a validation command only when explicitly supplied.
+
+---
+
 ## Roadmap
 
 | Phase | Focus | Status |
 |---|---|---|
 | 01 | Repository discovery | Implemented |
-| 02 | Managed worktrees | Implemented |
+| 02 | Managed worktrees, reconciliation and confirmed removal | Implemented; hosted CI and safety review pending |
 | 03 | Diff collection and overlap detection | Implemented |
 | 04 | Non-destructive integration planning and review branches | Implemented |
 | 05 | Ratatui terminal interface | Planned |

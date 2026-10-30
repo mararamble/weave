@@ -2,17 +2,23 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 mod changeset;
+mod git_process;
 mod integration;
 mod overlap;
+mod reconcile;
+mod removal;
 mod workspace;
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 #[derive(Parser)]
-#[command(version, about = "Coordinate work across Git worktrees")]
+#[command(
+    version,
+    about = "Coordinate work across Git worktrees",
+    after_help = "Requires Git with NUL-delimited status and worktree listings and rev-parse --path-format=absolute; planning also requires merge-tree --write-tree. See README for configured-filter and path limitations."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -31,7 +37,21 @@ enum Commands {
         #[arg(last = true)]
         validation: Vec<std::ffi::OsString>,
     },
-    /// Preview ordered integration of workspace changes
+    /// Preview or remove a clean managed worktree; its branch is retained
+    Remove {
+        name: String,
+        #[arg(long, conflicts_with = "yes")]
+        dry_run: bool,
+        /// Confirm deletion of the specified worktree and metadata
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Inspect managed and unknown worktrees without changing them
+    Reconcile {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Preview ordered integration of committed workspace changes
     Plan {
         #[arg(long)]
         json: bool,
@@ -96,16 +116,20 @@ where
         .into_iter()
         .map(|s| s.as_ref().to_os_string())
         .collect();
-    let output = Command::new("git")
-        .args(["-c", "core.fsmonitor=false"])
-        .args(&args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .context("Could not run Git; install Git and ensure it is on PATH")?;
+    let output = git_process::output(git_process::command().args(&args))?;
     if !output.status.success() {
+        let operation = args
+            .iter()
+            .filter_map(|a| a.to_str())
+            .find(|a| {
+                matches!(
+                    *a,
+                    "rev-parse" | "status" | "worktree" | "diff" | "symbolic-ref" | "config"
+                )
+            })
+            .unwrap_or("operation");
         bail!(
-            "Git {:?} failed: {}",
-            args,
+            "Git {operation} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -124,23 +148,53 @@ fn path_from_bytes(bytes: &[u8]) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(line(bytes)).into_owned())
 }
 fn git_path(arg: &str) -> Result<PathBuf> {
-    let p = path_from_bytes(&git(["rev-parse", "--path-format=absolute", arg])?);
+    let output = git(["rev-parse", "--path-format=absolute", arg])
+        .context("Git must support rev-parse --path-format=absolute; upgrade Git if this option is unavailable")?;
+    if output.starts_with(b"--path-format=absolute\n") {
+        bail!("Git does not support rev-parse --path-format=absolute; upgrade Git");
+    }
+    let p = path_from_bytes(&output);
     p.canonicalize()
         .with_context(|| format!("Cannot resolve Git path {}", p.display()))
 }
 fn counts(bytes: &[u8]) -> Result<(usize, usize, usize)> {
-    let mut records = bytes.split(|b| *b == 0);
-    let (mut staged, mut unstaged, mut untracked) = (0, 0, 0);
+    let (staged, unstaged, untracked, _) = status_counts(bytes)?;
+    Ok((staged, unstaged, untracked))
+}
+fn status_counts(bytes: &[u8]) -> Result<(usize, usize, usize, usize)> {
+    if !bytes.is_empty() && !bytes.ends_with(&[0]) {
+        bail!("Truncated Git porcelain status output");
+    }
+    let mut records = bytes.split(|b| *b == 0).peekable();
+    let (mut staged, mut unstaged, mut untracked, mut ignored) = (0, 0, 0, 0);
     while let Some(r) = records.next() {
-        if r.is_empty() {
-            continue;
+        if r.is_empty() && records.peek().is_none() {
+            break;
         }
         if r.len() < 4 || r[2] != b' ' {
             bail!("Unexpected Git porcelain status record");
         }
         let (x, y) = (r[0], r[1]);
+        let valid = matches!(
+            (x, y),
+            (b'?', b'?')
+                | (b'!', b'!')
+                | (b' ', b'M' | b'T' | b'D' | b'R' | b'C')
+                | (
+                    b'M' | b'T' | b'A' | b'D' | b'R' | b'C',
+                    b' ' | b'M' | b'T' | b'D' | b'R' | b'C'
+                )
+                | (b'D', b'U')
+                | (b'A', b'A' | b'U')
+                | (b'U', b'D' | b'A' | b'U')
+        );
+        if !valid {
+            bail!("Unexpected Git porcelain status code");
+        }
         if x == b'?' && y == b'?' {
             untracked += 1;
+        } else if x == b'!' && y == b'!' {
+            ignored += 1;
         } else {
             if x != b' ' {
                 staged += 1;
@@ -155,19 +209,20 @@ fn counts(bytes: &[u8]) -> Result<(usize, usize, usize)> {
             bail!("Missing rename source in Git status");
         }
     }
-    Ok((staged, unstaged, untracked))
+    Ok((staged, unstaged, untracked, ignored))
 }
 fn status() -> Result<Status> {
     let root = git_path("--show-toplevel")
         .context("Not in a Git worktree; run this command inside a Git repository")?;
     let gd = git_path("--absolute-git-dir")?;
     let common = git_path("--git-common-dir")?;
-    let branch_output = Command::new("git")
-        .args(["-c", "core.fsmonitor=false"])
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .context("Could not run Git to inspect HEAD")?;
+    let branch_output = git_process::output(git_process::command().args([
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "HEAD",
+    ]))
+    .context("Could not run Git to inspect HEAD")?;
     let branch = if branch_output.status.success() {
         Some(String::from_utf8_lossy(line(&branch_output.stdout)).into_owned())
     } else if branch_output.status.code() == Some(1) {
@@ -178,12 +233,13 @@ fn status() -> Result<Status> {
             String::from_utf8_lossy(&branch_output.stderr).trim()
         )
     };
-    let head = Command::new("git")
-        .args(["-c", "core.fsmonitor=false"])
-        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .context("Could not run Git to inspect commit")?;
+    let head = git_process::output(git_process::command().args([
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "HEAD",
+    ]))
+    .context("Could not run Git to inspect commit")?;
     if !head.status.success() && head.status.code() != Some(1) {
         bail!(
             "Git rev-parse HEAD failed: {}",
@@ -228,6 +284,8 @@ fn main() -> Result<()> {
             names,
             validation,
         } => integration::integrate(&names, &branch, &validation, json)?,
+        Commands::Remove { name, dry_run, yes } => removal::remove(&name, dry_run, yes)?,
+        Commands::Reconcile { json } => reconcile::show(json)?,
         Commands::Plan { json, names } => integration::show(&names, json)?,
         Commands::Overlaps { json, names } => overlap::show(&names, json)?,
         Commands::Diff { name, stat, json } => changeset::show(&name, stat, json)?,
@@ -282,5 +340,15 @@ mod tests {
             (2, 1, 1)
         );
         assert!(counts(b"R  a\0").is_err());
+        for malformed in [
+            &b" M file"[..],
+            &b" M \0"[..],
+            &b"XX file\0"[..],
+            &b"?? file\0\0 M other\0"[..],
+            &b"R  new\0old"[..],
+        ] {
+            assert!(counts(malformed).is_err(), "accepted {malformed:?}");
+        }
+        assert_eq!(counts(b" M \xff\nname\0").unwrap(), (0, 1, 0));
     }
 }

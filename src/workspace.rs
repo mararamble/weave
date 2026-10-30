@@ -3,9 +3,9 @@ use std::{fs, io::Write};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Record {
-    schema_version: u32,
+    pub(crate) schema_version: u32,
     pub(crate) name: String,
-    branch: String,
+    pub(crate) branch: String,
     pub(crate) base_commit: String,
     pub(crate) repository: String,
     pub(crate) path: String,
@@ -26,7 +26,7 @@ struct Listing {
 fn metadata() -> Result<PathBuf> {
     Ok(git_path("--git-common-dir")?.join("weave"))
 }
-fn validate(name: &str) -> Result<()> {
+pub(crate) fn validate(name: &str) -> Result<()> {
     if name.is_empty()
         || name.len() > 80
         || !name
@@ -108,37 +108,117 @@ pub fn create(name: &str, from: &str) -> Result<()> {
         );
     }
     record.state = "ready".into();
-    let tmp = meta.join(format!(".{name}.tmp-{}", std::process::id()));
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)?;
-    serde_json::to_writer(&mut f, &record)?;
-    f.write_all(b"\n")?;
-    f.sync_all()?;
-    drop(f);
-    fs::rename(&tmp, &record_path).context("Worktree was created but metadata finalization failed; inspect the pending record and worktree")?;
+    (|| -> Result<()> {
+        let tmp = meta.join(format!(".{name}.tmp-{}", std::process::id()));
+        let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        serde_json::to_writer(&mut f, &record)?;
+        f.write_all(b"\n")?;
+        f.sync_all()?;
+        drop(f);
+        fs::rename(&tmp, &record_path)?;
+        Ok(())
+    })().context("Worktree was created but metadata finalization failed; inspect the pending record and worktree")?;
     println!("{}", path.display());
     Ok(())
 }
+#[derive(Debug)]
+pub(crate) struct GitWorktree {
+    pub(crate) path: PathBuf,
+    pub(crate) head: Option<Vec<u8>>,
+    pub(crate) branch: Option<Vec<u8>>,
+    pub(crate) detached: bool,
+    pub(crate) bare: bool,
+    pub(crate) locked: bool,
+    pub(crate) prunable: bool,
+}
+
+pub(crate) fn parse_worktrees(output: &[u8]) -> Result<Vec<GitWorktree>> {
+    if output.is_empty() || !output.ends_with(b"\0\0") {
+        bail!("Truncated Git worktree listing");
+    }
+    let mut result = Vec::new();
+    let mut current: Option<GitWorktree> = None;
+    for field in output[..output.len() - 1].split(|b| *b == 0) {
+        if field.is_empty() {
+            let item = current.take().context("Empty Git worktree record")?;
+            if (item.bare && (item.head.is_some() || item.branch.is_some() || item.detached))
+                || (!item.bare && (item.head.is_none() || item.branch.is_some() == item.detached))
+            {
+                bail!("Incomplete Git worktree record");
+            }
+            if result
+                .iter()
+                .any(|existing: &GitWorktree| existing.path == item.path)
+            {
+                bail!("Duplicate Git worktree path");
+            }
+            result.push(item);
+        } else if let Some(path) = field.strip_prefix(b"worktree ") {
+            if current.is_some() || path.is_empty() {
+                bail!("Invalid Git worktree path record");
+            }
+            #[cfg(unix)]
+            let path = {
+                use std::os::unix::ffi::OsStrExt;
+                PathBuf::from(OsStr::from_bytes(path))
+            };
+            #[cfg(not(unix))]
+            let path = PathBuf::from(
+                std::str::from_utf8(path)
+                    .context("Non-UTF-8 Git worktree path is unsupported on this platform")?,
+            );
+            current = Some(GitWorktree {
+                path,
+                head: None,
+                branch: None,
+                detached: false,
+                bare: false,
+                locked: false,
+                prunable: false,
+            });
+        } else {
+            let item = current
+                .as_mut()
+                .context("Git worktree field without path")?;
+            if let Some(head) = field.strip_prefix(b"HEAD ") {
+                if item.head.is_some()
+                    || !matches!(head.len(), 40 | 64)
+                    || !head.iter().all(u8::is_ascii_hexdigit)
+                {
+                    bail!("Invalid Git worktree HEAD");
+                }
+                item.head = Some(head.to_vec());
+            } else if let Some(branch) = field.strip_prefix(b"branch ") {
+                if item.branch.is_some()
+                    || !branch.starts_with(b"refs/heads/")
+                    || branch.len() == b"refs/heads/".len()
+                {
+                    bail!("Invalid Git worktree branch");
+                }
+                item.branch = Some(branch.to_vec());
+            } else if field == b"detached" && !item.detached {
+                item.detached = true;
+            } else if field == b"bare" && !item.bare {
+                item.bare = true;
+            } else if (field == b"locked" || field.starts_with(b"locked ")) && !item.locked {
+                item.locked = true;
+            } else if (field == b"prunable" || field.starts_with(b"prunable ")) && !item.prunable {
+                item.prunable = true;
+            } else {
+                bail!("Unexpected Git worktree field");
+            }
+        }
+    }
+    if current.is_some() || result.is_empty() {
+        bail!("Incomplete Git worktree listing");
+    }
+    Ok(result)
+}
+
 pub fn list(json: bool) -> Result<()> {
     let common = git_path("--git-common-dir")?;
     let output = git(["worktree", "list", "--porcelain", "-z"])?;
-    let paths: Vec<PathBuf> = output
-        .split(|b| *b == 0)
-        .filter_map(|r| r.strip_prefix(b"worktree "))
-        .map(|p| {
-            #[cfg(unix)]
-            {
-                use std::os::unix::ffi::OsStrExt;
-                PathBuf::from(OsStr::from_bytes(p))
-            }
-            #[cfg(not(unix))]
-            {
-                PathBuf::from(String::from_utf8_lossy(p).into_owned())
-            }
-        })
-        .collect();
+    let paths = parse_worktrees(&output)?;
     let meta = common.join("weave");
     let mut entries = Vec::new();
     if meta.exists() {
@@ -153,14 +233,14 @@ pub fn list(json: bool) -> Result<()> {
                 bail!("Unsupported metadata version in {}", path.display());
             }
             let p = PathBuf::from(&record.path);
-            let exists = p.is_dir() && paths.iter().any(|x| x == &p);
+            let exists = p.is_dir() && paths.iter().any(|x| x.path == p);
             let dirty = if exists {
-                let out = Command::new("git")
-                    .args(["-c", "core.fsmonitor=false", "-C"])
-                    .arg(&p)
-                    .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-                    .env("GIT_OPTIONAL_LOCKS", "0")
-                    .output()?;
+                let out = crate::git_process::output(crate::git_process::command_at(&p).args([
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                ]))?;
                 if !out.status.success() {
                     bail!(
                         "Cannot inspect {}: {}",
@@ -168,7 +248,10 @@ pub fn list(json: bool) -> Result<()> {
                         String::from_utf8_lossy(&out.stderr)
                     );
                 }
-                Some(!out.stdout.is_empty())
+                Some({
+                    let (staged, unstaged, untracked) = counts(&out.stdout)?;
+                    staged + unstaged + untracked > 0
+                })
             } else {
                 None
             };
@@ -246,4 +329,24 @@ pub(crate) fn names() -> Result<Vec<String>> {
     }
     result.sort();
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn validates_worktree_records() {
+        let parsed = parse_worktrees(b"worktree /tmp/a b\0HEAD 0123456789012345678901234567890123456789\0branch refs/heads/trunk\0locked reason\0\0worktree /tmp/other\0HEAD 1234567890123456789012345678901234567890\0detached\0prunable reason\0\0").unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed[0].locked);
+        assert!(parsed[1].prunable);
+        for invalid in [
+            &b"worktree /tmp/x\0HEAD 1234\0"[..],
+            &b"worktree /tmp/x\0HEAD 1234\0\0"[..],
+            &b"HEAD 1234\0\0"[..],
+            &b"worktree /tmp/x\0HEAD 1234567890123456789012345678901234567890\0detached\0unknown\0\0"[..],
+        ] {
+            assert!(parse_worktrees(invalid).is_err());
+        }
+    }
 }

@@ -19,6 +19,18 @@ pub(crate) enum ChangeKind {
     Unmerged,
 }
 
+fn valid_score(code: u8, suffix: &[u8]) -> bool {
+    if suffix.is_empty() {
+        return !matches!(code, b'R' | b'C');
+    }
+    matches!(code, b'R' | b'C' | b'M')
+        && suffix.iter().all(u8::is_ascii_digit)
+        && std::str::from_utf8(suffix)
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .is_some_and(|score| score <= 100)
+}
+
 /// Parse `git diff --name-status -z` without interpreting file names as UTF-8.
 pub(crate) fn parse_name_status(input: &[u8]) -> Result<Vec<FileChange>> {
     if !input.is_empty() && !input.ends_with(&[0]) {
@@ -45,9 +57,7 @@ pub(crate) fn parse_name_status(input: &[u8]) -> Result<Vec<FileChange>> {
             _ => bail!("Unknown Git name-status code"),
         };
         let suffix = &status[1..];
-        if (!suffix.is_empty() && !suffix.iter().all(u8::is_ascii_digit))
-            || (!matches!(code, b'R' | b'C' | b'M') && !suffix.is_empty())
-        {
+        if !valid_score(code, suffix) {
             bail!("Invalid Git name-status score");
         }
         let first = fields
@@ -86,12 +96,49 @@ mod tests {
         assert_eq!(changes[1].kind, ChangeKind::Renamed);
     }
     #[test]
+    fn validates_nul_path_lists() {
+        assert_eq!(
+            parse_path_list(b"odd\nname\0\xff\0").unwrap(),
+            vec![&b"odd\nname"[..], &b"\xff"[..]]
+        );
+        assert!(parse_path_list(b"path").is_err());
+        assert!(parse_path_list(b"path\0\0other\0").is_err());
+    }
+    #[test]
+    fn rejects_inconsistent_diff_metadata() {
+        let make = || {
+            vec![convert(FileChange {
+                kind: ChangeKind::Modified,
+                path: b"file".to_vec(),
+                previous_path: None,
+            })]
+        };
+        for (format, bytes) in [
+            ("--numstat", &b"1\t2\tfile"[..]),
+            ("--numstat", &b"1\t2\tunknown\0"[..]),
+            ("--numstat", &b"1\t2\tfile\x001\t2\tfile\0"[..]),
+            ("--numstat", &b"1\t-\tfile\0"[..]),
+            ("--raw", &b":100644 100644 abc def M\0\0"[..]),
+            ("--raw", &b":100644 100644 abc def D\0file\0"[..]),
+            ("--raw", &b":100644 100644 abc def M extra\0file\0"[..]),
+        ] {
+            assert!(
+                apply_metadata(&mut make(), bytes, format).is_err(),
+                "accepted {bytes:?}"
+            );
+        }
+        assert!(apply_metadata(&mut make(), b"1\t2\tfile\0", "--numstat").is_ok());
+        assert!(apply_metadata(&mut make(), b":100644 100644 abc def M\0file\0", "--raw").is_ok());
+    }
+    #[test]
     fn rejects_malformed_output() {
         for bytes in [
             &b"M\0file"[..],
             &b"R100\0old\0"[..],
             &b"X\0file\0"[..],
             &b"M\0\0"[..],
+            &b"R101\0old\0new\0"[..],
+            &b"R\0old\0new\0"[..],
         ] {
             assert!(parse_name_status(bytes).is_err());
         }
@@ -101,11 +148,7 @@ mod tests {
 use crate::workspace;
 use anyhow::Context;
 use serde::Serialize;
-use std::{
-    io::Read,
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{io::Read, path::Path};
 
 const LIMIT: u64 = 16 * 1024 * 1024;
 #[derive(Clone, Serialize)]
@@ -170,51 +213,20 @@ fn convert(c: FileChange) -> Change {
     }
 }
 fn run(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let mut child = Command::new("git")
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-C",
-        ])
-        .arg(path)
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_PAGER", "cat")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Could not run Git")?;
-    let stderr = child.stderr.take().unwrap();
-    let stderr_reader = std::thread::spawn(move || {
-        let mut data = Vec::new();
-        let _ = stderr.take(65536).read_to_end(&mut data);
-        data
-    });
-    let mut output = Vec::new();
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .take(LIMIT + 1)
-        .read_to_end(&mut output)?;
-    if output.len() as u64 > LIMIT {
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = stderr_reader.join();
-        bail!("Git output exceeds 16 MiB; collection is incomplete");
-    }
-    let result = child.wait()?;
-    let stderr = stderr_reader.join().unwrap_or_default();
-    if !result.success() {
+    let output = crate::git_process::bounded_output(
+        crate::git_process::command_at(path)
+            .args(args)
+            .env("GIT_PAGER", "cat"),
+        LIMIT as usize,
+    )?;
+    if !output.status.success() {
         bail!(
-            "Git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&stderr)
+            "Git {} failed: {}",
+            args.first().copied().unwrap_or("command"),
+            String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(output)
+    Ok(output.stdout)
 }
 fn changes(path: &Path, args: &[&str]) -> Result<Vec<Change>> {
     let mut result: Vec<Change> = parse_name_status(&run(path, args)?)?
@@ -227,57 +239,159 @@ fn changes(path: &Path, args: &[&str]) -> Result<Vec<Change>> {
             .map(|a| if *a == "--name-status" { format } else { *a })
             .collect();
         let bytes = run(path, &mapped)?;
-        if !bytes.is_empty() && !bytes.ends_with(&[0]) {
-            bail!("Truncated Git {format} output");
-        }
-        let mut fields = bytes.split(|b| *b == 0);
-        while let Some(record) = fields.next() {
-            if record.is_empty() {
-                break;
-            }
-            if format == "--numstat" {
-                let mut parts = record.splitn(3, |b| *b == b'\t');
-                let a = parts.next().context("Missing added count")?;
-                let d = parts.next().context("Missing deleted count")?;
-                let mut filename = parts.next().context("Missing numstat path")?;
-                if filename.is_empty() {
-                    fields.next().context("Missing rename source")?;
-                    filename = fields.next().context("Missing rename destination")?;
-                }
-                if let Some(item) = result.iter_mut().find(|c| c.path_hex == hex(filename)) {
-                    if a == b"-" && d == b"-" {
-                        item.binary = Some(true);
-                    } else {
-                        item.added = Some(std::str::from_utf8(a)?.parse()?);
-                        item.deleted = Some(std::str::from_utf8(d)?.parse()?);
-                        item.binary = Some(false);
-                    }
-                }
-            } else {
-                let header = std::str::from_utf8(record)?;
-                let mut parts = header.split_whitespace();
-                let old = parts
-                    .next()
-                    .context("Missing old mode")?
-                    .strip_prefix(':')
-                    .context("Invalid raw header")?;
-                let new = parts.next().context("Missing new mode")?;
-                parts.next().context("Missing old object")?;
-                parts.next().context("Missing new object")?;
-                let status = parts.next().context("Missing raw status")?;
-                let mut filename = fields.next().context("Missing raw path")?;
-                if status.starts_with('R') || status.starts_with('C') {
-                    filename = fields.next().context("Missing raw destination")?;
-                }
-                if let Some(item) = result.iter_mut().find(|c| c.path_hex == hex(filename)) {
-                    item.old_mode = Some(old.to_owned());
-                    item.new_mode = Some(new.to_owned());
-                }
-            }
-        }
+        apply_metadata(&mut result, &bytes, format)?;
     }
     Ok(result)
 }
+fn apply_metadata(result: &mut [Change], bytes: &[u8], format: &str) -> Result<()> {
+    if !bytes.is_empty() && !bytes.ends_with(&[0]) {
+        bail!("Truncated Git {format} output");
+    }
+    let mut fields = bytes.split(|b| *b == 0).peekable();
+    let mut seen = vec![false; result.len()];
+    while let Some(record) = fields.next() {
+        if record.is_empty() {
+            if fields.peek().is_some() {
+                bail!("Empty Git {format} record");
+            }
+            break;
+        }
+        let (filename, previous, counts, modes, status) = if format == "--numstat" {
+            let mut parts = record.splitn(3, |b| *b == b'\t');
+            let a = parts.next().context("Missing added count")?;
+            let d = parts.next().context("Missing deleted count")?;
+            let first = parts.next().context("Missing numstat path")?;
+            let counts = if a == b"-" && d == b"-" {
+                (None, None, true)
+            } else {
+                if a.is_empty()
+                    || d.is_empty()
+                    || !a.iter().all(u8::is_ascii_digit)
+                    || !d.iter().all(u8::is_ascii_digit)
+                {
+                    bail!("Invalid Git numstat counts");
+                }
+                (
+                    Some(std::str::from_utf8(a)?.parse::<u64>()?),
+                    Some(std::str::from_utf8(d)?.parse::<u64>()?),
+                    false,
+                )
+            };
+            let (path, previous) = if first.is_empty() {
+                let source = fields
+                    .next()
+                    .filter(|p| !p.is_empty())
+                    .context("Missing rename source")?;
+                let dest = fields
+                    .next()
+                    .filter(|p| !p.is_empty())
+                    .context("Missing rename destination")?;
+                (dest, Some(source))
+            } else {
+                (first, None)
+            };
+            (path, previous, Some(counts), None, None)
+        } else if format == "--raw" {
+            let header = std::str::from_utf8(record)?;
+            let mut parts = header.split(' ');
+            let old = parts
+                .next()
+                .context("Missing old mode")?
+                .strip_prefix(':')
+                .context("Invalid raw header")?;
+            let new = parts.next().context("Missing new mode")?;
+            let old_object = parts.next().context("Missing old object")?;
+            let new_object = parts.next().context("Missing new object")?;
+            let code = parts.next().context("Missing raw status")?;
+            if parts.next().is_some()
+                || old.len() != 6
+                || new.len() != 6
+                || !old.bytes().all(|b| (b'0'..=b'7').contains(&b))
+                || !new.bytes().all(|b| (b'0'..=b'7').contains(&b))
+                || old_object.is_empty()
+                || new_object.is_empty()
+                || !old_object.bytes().all(|b| b.is_ascii_hexdigit())
+                || !new_object.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                bail!("Invalid Git raw header");
+            }
+            let first = fields
+                .next()
+                .filter(|p| !p.is_empty())
+                .context("Missing raw path")?;
+            let (path, previous) = if code.starts_with('R') || code.starts_with('C') {
+                let dest = fields
+                    .next()
+                    .filter(|p| !p.is_empty())
+                    .context("Missing raw destination")?;
+                (dest, Some(first))
+            } else {
+                (first, None)
+            };
+            (path, previous, None, Some((old, new)), Some(code))
+        } else {
+            bail!("Unsupported Git metadata format");
+        };
+        let path_hex = hex(filename);
+        let previous_hex = previous.map(hex);
+        let index = result
+            .iter()
+            .position(|c| c.path_hex == path_hex && c.previous_path_hex == previous_hex)
+            .context("Git metadata does not match change listing")?;
+        if seen[index] {
+            bail!("Duplicate Git metadata record");
+        }
+        seen[index] = true;
+        let item = &mut result[index];
+        if let Some((added, deleted, binary)) = counts {
+            item.added = added;
+            item.deleted = deleted;
+            item.binary = Some(binary);
+        }
+        if let Some((old, new)) = modes {
+            item.old_mode = Some(old.to_owned());
+            item.new_mode = Some(new.to_owned());
+        }
+        if let Some(code) = status {
+            let (first, suffix) = code
+                .as_bytes()
+                .split_first()
+                .context("Missing raw status")?;
+            let kind = match first {
+                b'A' => "added",
+                b'M' => "modified",
+                b'D' => "deleted",
+                b'R' => "renamed",
+                b'C' => "copied",
+                b'T' => "type_changed",
+                b'U' => "unmerged",
+                _ => bail!("Invalid raw status"),
+            };
+            if kind != item.kind || !valid_score(*first, suffix) {
+                bail!("Git raw status does not match change listing");
+            }
+        }
+    }
+    if seen.iter().any(|s| !s) {
+        bail!("Missing Git {format} record");
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_path_list(bytes: &[u8]) -> Result<Vec<&[u8]>> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let body = bytes
+        .strip_suffix(&[0])
+        .context("Truncated Git path list")?;
+    let paths: Vec<_> = body.split(|b| *b == 0).collect();
+    if paths.iter().any(|path| path.is_empty()) {
+        bail!("Empty Git path list record");
+    }
+    Ok(paths)
+}
+
 const FILE_LIMIT: u64 = 1024 * 1024;
 const TOTAL_LIMIT: u64 = 8 * 1024 * 1024;
 fn sensitive(path: &[u8]) -> bool {
@@ -493,13 +607,9 @@ pub(crate) fn collect(name: &str) -> Result<Changeset> {
         ],
     )?;
     let raw = run(path, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-    if !raw.is_empty() && !raw.ends_with(&[0]) {
-        bail!("Truncated untracked file list");
-    }
     let mut total = 0;
-    let untracked_changes: Vec<Change> = raw
-        .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
+    let untracked_changes: Vec<Change> = parse_path_list(&raw)?
+        .into_iter()
         .map(|p| capture(path, p, &mut total))
         .collect();
     aggregate_changes.extend(untracked_changes.iter().cloned());
@@ -520,9 +630,8 @@ pub(crate) fn collect(name: &str) -> Result<Changeset> {
     )?;
     let untracked_after = run(path, &["ls-files", "--others", "--exclude-standard", "-z"])?;
     let mut verify_total = 0;
-    let verify_untracked: Vec<Change> = untracked_after
-        .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
+    let verify_untracked: Vec<Change> = parse_path_list(&untracked_after)?
+        .into_iter()
         .map(|p| capture(path, p, &mut verify_total))
         .collect();
     if untracked_changes
