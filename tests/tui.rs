@@ -23,7 +23,6 @@ impl Terminal {
     }
     fn with_args(repo: &Path, spaces: &Path, args: &[&str]) -> Self {
         let (mut master_fd, mut slave_fd) = (-1, -1);
-        #[cfg_attr(target_os = "linux", allow(unused_mut))]
         let mut size = libc::winsize {
             ws_row: 30,
             ws_col: 140,
