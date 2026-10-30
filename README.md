@@ -8,7 +8,7 @@ Run multiple agents against the same repository, keep their changes independent,
 
 Built in Rust. Terminal-first. Agent-agnostic.
 
-> **Project status: Pre-alpha.** Local worktree management, diff inspection, overlap detection, and non-destructive integration planning are implemented. Remote synchronization and interactive change separation are planned.
+> **Project status: Pre-alpha.** Local worktree management, diff inspection, overlap detection, non-destructive integration planning, and Vineweaver Untangle review/export are implemented. Remote synchronization is planned.
 
 ## Why Weave?
 
@@ -66,14 +66,18 @@ Preview ordered workspace changes with Git merge analysis in temporary state, pr
 
 Create a separate review branch from selected workspaces and optionally run an explicitly supplied validation command in a disposable checkout.
 
+**Vineweaver Untangle review and export**
+
+Capture a mixed workspace into byte-preserving patch units, assign separate same-file hunks to named groups, and validate each group and an ordered sequence without modifying the source. Review assignments interactively and explicitly export ordered patches or portable independent commits. Ownership remains unknown.
+
 **Structured output**
 
-Machine-readable JSON is available for repository status, workspace listing, reconciliation, diff inspection, overlap analysis, integration planning, and integration results.
+Machine-readable JSON is available for repository status, workspace listing, reconciliation, diff inspection, overlap analysis, integration planning, integration results, and Untangle previews.
 
 ### Planned
 
 - **Integration enhancements:** Persistent, replayable plans and richer recovery and validation workflows.
-- **Untangle:** Interactively separate mixed working-tree changes into independent patch groups.
+- **Vineweaver enhancements:** Saved review-session loading and finer splitting beyond existing safe Git hunk boundaries.
 - **Remote Link:** Retrieve committed and uncommitted changes from other machines over SSH.
 - **Distributed integration:** Combine and validate changesets originating from multiple machines.
 - **Terminal UI:** A keyboard-first interface built with Ratatui.
@@ -202,6 +206,87 @@ weave overlaps auth parser --json
 Weave identifies files modified by multiple workspaces and, when analysis is supported, compares changed source regions.
 
 **Note:** A detected overlap isn't necessarily a merge conflict, and non-overlapping changes aren't guaranteed to be semantically compatible.
+
+---
+
+## Vineweaver Untangle grouping, review and export
+
+```bash
+weave untangle auth --json
+# Copy snapshot.id and unit IDs from that capture:
+weave untangle auth --snapshot SNAPSHOT_ID \
+  --group feature --group cleanup \
+  --assign UNIT_ID_1=feature --assign UNIT_ID_2=cleanup --json
+# Optional: --order cleanup --order feature
+# Optional: --unassign UNIT_ID_1 (processed after assignments)
+```
+
+`weave untangle NAME` prints a read-only preview with unit IDs, hunk ranges, group assignments, unassigned count, applicability, and warnings. JSON version 1 includes `snapshot`, `groups`, `unassigned`, `selection_complete`, `sequence_applicable`, `applications`, and typed `warnings`. The versioned snapshot contains the recorded base commit, captured tree identity, completeness, existing changeset context (committed/staged/unstaged/untracked), files and units. Units contain exact `path_hex` and `patch_hex`, a display path, a hunk range where applicable, and `ownership: "unknown"`. The final diff establishes no authorship.
+
+Each invocation recaptures the workspace. Assignments require `--snapshot` and full unit IDs from the same capture; a changed HEAD, source index, tracked/untracked content, or collection context invalidates them. Group names must be unique and nonempty. Repeated assignments are rejected; `--unassign` clears an assignment. Assignment argument order does not affect unit order. Groups run in creation order unless `--order` supplies every group exactly once. Grouping is held in memory for this invocation; persist the command arguments to replay it against an unchanged capture. There is no saved editable snapshot file yet.
+
+Capture starts from the final workspace state relative to its recorded base, preserving staging layers as context rather than reproducing intermediate index states. Existing Git context hunks in ordinary text modifications can be assigned separately; edits within one contiguous or overlapping hunk remain indivisible. Additions, deletions, binary content, mode/type changes and symlinks remain whole-file operations. Renames are represented as deletion/addition units: assign both together to preserve a move. Submodule changes are rejected as unsupported. Git-generated patch headers are parsed in bytes, while NUL-delimited metadata supplies exact paths; non-UTF-8 filesystem paths are supported where the OS permits them. No arbitrary line-level splitting or authorship suggestions are provided.
+
+Every captured unit is checked to reconstruct the exact captured tree. Each named group is applied independently against the base in a temporary index/object database, then groups are applied in the requested sequence. Sequence evaluation stops at the first failure. A group that fails alone but succeeds after a prefix reports `applicable_after_prefix` and an uncertainty warning; this observation does not prove a specific dependency. For example, replacing a file with a directory can require its deletion before adding a child path. Applicability failures are warnings and exit zero; capture, stale assignment and operational errors exit nonzero without a partial JSON preview. Applicability does not establish semantic correctness. Unassigned units stay visible; `selection_complete` is false while any remain.
+
+Capture and validation compare source identities before/after capture and before/after validation. These checks are **not atomic** and cannot detect every concurrent edit. Source files, indexes, branches and refs are never written. Git output and aggregate generated patches are limited to 16 MiB, source indexes to 64 MiB; untracked files inherit the 1 MiB/file, 8 MiB total, regular-file-only and sensitive-path exclusions below. Unsupported indexes, configured clean/process filters, incomplete untracked reads and exceeded limits fail capture. Ignored files remain excluded. Private state is removed on normal completion and returned errors, including interrupted Git subprocesses. Abrupt process termination (for example SIGKILL) can leave an OS temporary directory; capture is not a persistent archive.
+
+`untangle::Engine` provides `capture`, `add_group`, `assign` (including unassignment), `verify_source`, and `validate` with typed version-1 snapshot, file, hunk, unit, group, application and diagnostic records. The engine owns the temporary object database; tree IDs cease to be locally available when it is dropped (unless independently present in the source). The UI must retain the engine, use the snapshot ID on edits, and call `verify_source` before using stale state; validation also checks automatically. Vineweaver review retains the engine in a dedicated worker, applies versioned review plans, and rejects stale validation results.
+
+Open interactive review directly, or select a workspace in `weave tui` and press `u`:
+
+```bash
+weave untangle auth --review
+```
+
+Review controls:
+
+| Key | Action |
+|---|---|
+| Tab | Switch units, groups, and preview panes |
+| ↑/↓ or j/k | Select a file/hunk unit or group; scroll the preview |
+| g / n / d | Create, rename, or delete the active group (deletion unassigns its units) |
+| Space / x | Assign or move the selected unit to the active group / unassign |
+| [ / ] | Move the active group earlier / later in the export order |
+| u | Undo an assignment/group/order edit (up to 32 edits within an 8 MiB history budget) |
+| s | Explain safe split boundaries: existing Git hunks are already separate units; indivisible edits remain whole |
+| v | Validate groups and reconstruct the selected aggregate |
+| p / c | Export ordered patches / independent commits after validation |
+| PageUp / PageDown | Scroll validation and patch details |
+| r | Recapture, discarding session edits |
+| Esc | Cancel a prompt or request cancellation of current work |
+| ? / q / Ctrl-C | Help / quit |
+
+The review shows snapshot/base identity, an always-visible unassigned count and validation summary, per-group independent/sequence applicability, dependency uncertainty, unit patches and group previews. Units are automatically separated at the safe Git hunk boundaries supported by the engine; manual splitting inside an indivisible hunk is unavailable. Long lines wrap and small terminals stack the panes. Previews have a 2 MiB raw-byte budget per capture, 64 KiB per unit and 128 KiB per displayed group; truncation is marked and never affects exported bytes. Capture, validation and export run on a worker. Edits are disabled while a job runs; results carry review revisions and stale results are discarded. Cancellation is cooperative between Git operations, so the current subprocess may finish before cleanup. Quit restores the terminal before waiting for worker cleanup. Local pseudo-terminal restoration is tested; SSH verification remains pending.
+
+TUI exports require a new destination directory, display the exact captured base and group order, and require typing `export`. A selection with unassigned units additionally requires typing `partial`; it is never labeled a complete reconstruction. The export worker repeats validation and source checks rather than trusting a previously displayed result.
+
+The CLI can export the same explicitly assigned groups:
+
+```bash
+weave untangle auth --snapshot SNAPSHOT_ID --base BASE_COMMIT \
+  --group feature --group cleanup \
+  --assign UNIT_ID_1=feature --assign UNIT_ID_2=cleanup \
+  --export-patches ../review-patches --json
+# Use --export-commits ../review-commits for independent commits.
+# Partial selections additionally require --allow-partial.
+```
+
+`--base` must exactly equal the recorded base commit ID. Group creation order is the sequence unless every group is supplied through repeated `--order`. Destinations must have an existing parent and be absent, including dangling symlinks; existing files, directories and refs are never overwritten. Destinations inside the source workspace or its shared Git directory are refused. Export stages beside the destination, verifies patch application and tree identity (contents, paths and modes), rechecks the source, then publishes with an atomic no-overwrite rename. This publication is supported on Linux and macOS; other platforms refuse export. Returned errors clean staging state. Abrupt termination can leave `.vineweaver-export-*` siblings and OS temporary repositories; inspect and remove those only after the process has exited. Cancellation arriving after publication leaves the completed export intact.
+
+Every export contains numbered **ordered** patches, `aggregate.patch`, `manifest.json`, `validation.json`, and `review-plan.json`. The manifest records the source identity, base, order, independent applicability, captured/selected tree identities, completeness and unknown ownership. `validation.json` retains exact engine warnings and the reconstruction comparison; `review-plan.json` is an audit record, with no session-loading command yet. Numbered patches are regenerated against successive trees and independently re-applied for verification. With a complete selection, the final tree must exactly match the captured aggregate or export fails. With a partial selection, the manifest explicitly reports the omitted units and partial reconstruction. A sequence that fails Git application cannot be exported.
+
+Apply numbered patches in manifest order, or apply `aggregate.patch` once, against the recorded base. A dependent group can be exported in an applicable patch sequence; its manifest entry has `independent: false`. Commit export requires **every** group to apply independently and creates `commits.bundle` containing `refs/heads/vineweaver-0001`, etc. Each synthetic commit has the recorded base as its parent; these commits are sibling alternatives, not a linear history. The commit message identifies Vineweaver; author/committer use the synthetic Weave Preview identity and make no original-authorship claim. The manifest's entry tree is the ordered reconstruction tree; its commit ID refers to the independent commit. The portable bundle includes the base history and may be much larger than the patch budget. It is verified before publication and can be imported without access to the source repository:
+
+```bash
+git init imported-review
+git -C imported-review fetch /absolute/path/review-commits/commits.bundle \
+  refs/heads/vineweaver-0001:refs/heads/review-feature
+```
+
+No source branch or ref is created by either export mode; bundle refs exist only in the private repository. Applicability does not prove semantic compatibility. Capture remains non-atomic, and unsupported/incomplete content is refused under the engine limits above.
+
+Disposable-repository coverage includes independent same-file groups, indivisible edits, file/directory ordering warnings, stale/conflicting assignments, source races, interrupted Git cleanup, binary/mode/rename/deletion changes, untracked byte paths where supported, limits and filter/index refusal, aggregate and portable bundle reconstruction, destination races, export interruption/source drift, keyboard undo/reorder, narrow layouts, and local pseudo-terminal quit/cancellation restoration (including cancellation during bundle export). Verification: `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
 
 ---
 
@@ -581,7 +666,8 @@ Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and
 | 03 | Diff collection and overlap detection | Implemented |
 | 04 | Non-destructive integration planning and review branches | Implemented |
 | 05 | Ratatui terminal interface | Implemented; SSH verification pending |
-| 06 | Mixed-diff Untangle engine | Planned |
+| 06 | Vineweaver Untangle engine | Implemented: snapshot-scoped hunk/whole-file assignment and isolated validation |
+| 06b | Vineweaver review and export (WEV-18) | Implemented: local TUI review, ordering/undo, verified patch and independent-commit bundle exports; SSH verification pending |
 | 07 | SSH remote linking | Planned |
 | 08 | Remote uncommitted snapshots | Planned |
 | 09 | Distributed integration | Planned |

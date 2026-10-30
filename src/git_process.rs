@@ -6,6 +6,37 @@ use std::{
     process::{Child, Command, Output, Stdio},
 };
 
+thread_local! {
+    static CANCEL: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> = const { std::cell::RefCell::new(None) };
+}
+pub(crate) fn check_cancelled() -> Result<()> {
+    CANCEL.with(|cell| {
+        if cell
+            .borrow()
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        {
+            anyhow::bail!("Operation cancelled");
+        }
+        Ok(())
+    })
+}
+pub(crate) fn cancellable<T>(
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CANCEL.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+    CANCEL.with(|cell| *cell.borrow_mut() = Some(flag));
+    let _reset = Reset;
+    check_cancelled()?;
+    work()
+}
+
 pub(crate) fn command() -> Command {
     let mut command = Command::new("git");
     command.args([
@@ -24,11 +55,15 @@ pub(crate) fn command() -> Command {
 
 /// Run a configured argument-vector command and preserve its exit status for callers.
 pub(crate) fn output(command: &mut Command) -> Result<Output> {
-    command.output().map_err(launch_error)
+    check_cancelled()?;
+    let result = command.output().map_err(launch_error);
+    check_cancelled()?;
+    result
 }
 
 /// Spawn a configured command when a caller needs bounded streaming or stdin.
 pub(crate) fn spawn(command: &mut Command) -> Result<Child> {
+    check_cancelled()?;
     command.spawn().map_err(launch_error)
 }
 /// Capture bounded stdout while draining stderr to avoid pipe deadlocks.
@@ -71,6 +106,7 @@ pub(crate) fn bounded_output(command: &mut Command, limit: usize) -> Result<Outp
     if too_large {
         anyhow::bail!("Git output exceeds {limit} bytes; inspection is incomplete");
     }
+    check_cancelled()?;
     Ok(Output {
         status,
         stdout,

@@ -32,7 +32,7 @@ struct Report {
     warnings: Vec<&'static str>,
 }
 
-fn run_with(
+pub(crate) fn run_with(
     dir: &Path,
     args: &[&str],
     worktree: Option<&Path>,
@@ -120,6 +120,7 @@ fn run_with(
     {
         result.context("Could not write Git input")?;
     }
+    crate::git_process::check_cancelled()?;
     Ok(Output {
         status,
         stdout,
@@ -129,7 +130,7 @@ fn run_with(
 fn run(dir: &Path, args: &[&str]) -> Result<Output> {
     run_with(dir, args, None, None)
 }
-fn check_output(output: Output) -> Result<Vec<u8>> {
+pub(crate) fn check_output(output: Output) -> Result<Vec<u8>> {
     if !output.status.success() {
         bail!(
             "Git preview failed: {}",
@@ -150,7 +151,19 @@ fn decode_hex(value: &str) -> Result<Vec<u8>> {
         .map(|i| u8::from_str_radix(&value[i..i + 2], 16).map_err(Into::into))
         .collect()
 }
-fn snapshot(dir: &Path, s: &changeset::Changeset) -> Result<String> {
+pub(crate) fn read_index(path: &Path) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .context("Cannot read workspace index")?
+        .take(64 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 64 * 1024 * 1024 {
+        bail!("Workspace index exceeds 64 MiB");
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn snapshot(dir: &Path, s: &changeset::Changeset) -> Result<String> {
     let record = workspace::get(&s.name)?;
     let worktree = Path::new(&record.path);
     let output = crate::git_process::output(
@@ -160,10 +173,7 @@ fn snapshot(dir: &Path, s: &changeset::Changeset) -> Result<String> {
         bail!("Cannot locate workspace index for {}", s.name);
     }
     let index = crate::path_from_bytes(&output.stdout).join("index");
-    let before = fs::read(&index).context("Cannot read workspace index")?;
-    if before.len() > 64 * 1024 * 1024 {
-        bail!("Workspace index exceeds 64 MiB");
-    }
+    let before = read_index(&index)?;
     fs::write(dir.join("preview-index"), &before)?;
     let unmerged = check_output(run(dir, &["ls-files", "--unmerged", "-z"])?)?;
     if !unmerged.is_empty() {
@@ -198,7 +208,7 @@ fn snapshot(dir: &Path, s: &changeset::Changeset) -> Result<String> {
     // Reset the private index before re-reading in case Git refreshed it.
     fs::write(dir.join("preview-index"), &before)?;
     let again = check_output(run_with(dir, &args, Some(worktree), None)?)?;
-    if patch != again || fs::read(&index)? != before {
+    if patch != again || read_index(&index)? != before {
         bail!("Workspace {} changed during snapshot; retry", s.name);
     }
     checked(dir, &["read-tree", &s.head_commit])?;
@@ -259,7 +269,7 @@ fn snapshot(dir: &Path, s: &changeset::Changeset) -> Result<String> {
         ],
     )
 }
-fn checked(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn checked(dir: &Path, args: &[&str]) -> Result<String> {
     let output = run(dir, args)?;
     if !output.status.success() {
         bail!(
@@ -328,23 +338,7 @@ impl PreparedCandidate {
     }
 }
 
-fn prepare(names: &[String]) -> Result<PreparedCandidate> {
-    if names.is_empty() {
-        bail!("Select at least one workspace");
-    }
-    let mut unique = HashSet::new();
-    for name in names {
-        if !unique.insert(name) {
-            bail!("Duplicate workspace name: {name}");
-        }
-    }
-    for name in names {
-        ensure_no_external_filters(name)?;
-    }
-    let sets: Vec<_> = names
-        .iter()
-        .map(|n| changeset::collect(n))
-        .collect::<Result<_>>()?;
+pub(crate) fn temporary_repository() -> Result<tempfile::TempDir> {
     let common = git_path("--git-common-dir")?;
     let objects = common.join("objects").canonicalize()?;
     let object_path = objects
@@ -369,6 +363,28 @@ fn prepare(names: &[String]) -> Result<PreparedCandidate> {
         dir.join("objects/info/alternates"),
         format!("{object_path}\n"),
     )?;
+    Ok(temp)
+}
+
+fn prepare(names: &[String]) -> Result<PreparedCandidate> {
+    if names.is_empty() {
+        bail!("Select at least one workspace");
+    }
+    let mut unique = HashSet::new();
+    for name in names {
+        if !unique.insert(name) {
+            bail!("Duplicate workspace name: {name}");
+        }
+    }
+    for name in names {
+        ensure_no_external_filters(name)?;
+    }
+    let sets: Vec<_> = names
+        .iter()
+        .map(|n| changeset::collect(n))
+        .collect::<Result<_>>()?;
+    let temp = temporary_repository()?;
+    let dir = temp.path();
     let base = sets[0].base_commit.clone();
     let mut candidate = base.clone();
     let snapshots: Vec<String> = sets

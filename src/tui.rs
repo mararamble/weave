@@ -21,7 +21,7 @@ use std::{
 const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 
 // Never pass terminal control characters from repository data to the terminal.
-fn safe(s: &str) -> String {
+pub(crate) fn safe(s: &str) -> String {
     s.chars()
         .flat_map(|c| {
             if c.is_control() {
@@ -393,11 +393,11 @@ fn format_review(v: &Value) -> String {
         s
     }
 }
-struct TerminalGuard;
+pub(crate) struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), crossterm::cursor::Show, LeaveAlternateScreen);
     }
 }
 pub(crate) fn run() -> Result<()> {
@@ -413,6 +413,7 @@ pub(crate) fn run() -> Result<()> {
     let mut terminal = Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))?;
     let mut app = App::new();
     app.refresh();
+    let mut vineweaver = None;
     loop {
         app.receive();
         terminal.draw(|f| draw(f, &app))?;
@@ -440,6 +441,12 @@ pub(crate) fn run() -> Result<()> {
             }
             match k.code {
                 KeyCode::Char('q') => break,
+                KeyCode::Char('u') => {
+                    if let Some(name) = app.name() {
+                        vineweaver = Some(name);
+                        break;
+                    }
+                }
                 KeyCode::Char('?') => app.help = !app.help,
                 KeyCode::Char('/') => {
                     app.editing = true;
@@ -496,9 +503,15 @@ pub(crate) fn run() -> Result<()> {
             }
         }
     }
+    drop(app);
+    drop(terminal);
+    drop(_guard);
+    if let Some(name) = vineweaver {
+        return crate::untangle_review::run_name(name);
+    }
     Ok(())
 }
-fn window(selected: usize, height: u16, len: usize) -> std::ops::Range<usize> {
+pub(crate) fn window(selected: usize, height: u16, len: usize) -> std::ops::Range<usize> {
     let h = height.saturating_sub(2) as usize;
     let start = selected.saturating_sub(h.saturating_sub(1)).min(len);
     start..(start + h).min(len)
@@ -565,7 +578,7 @@ fn draw(f: &mut Frame, app: &App) {
         cols[1],
     );
     let content = if app.help {
-        "q/Ctrl-C quit · ↑/↓ or j/k move · Tab switch pane\nEnter open workspace/file · Esc workspace pane\n/ filter workspaces · Space select for review\no overlap review · p integration preview · r refresh\nPageUp/PageDown scroll review\nReviews use selected workspaces, or all if none selected.\nThis TUI is read-only; use the CLI for mutations.".to_string()
+        "q/Ctrl-C quit · ↑/↓ or j/k move · Tab switch pane\nEnter open workspace/file · Esc workspace pane\n/ filter workspaces · Space select for review\no overlap review · p integration preview · r refresh\nu open selected workspace in Vineweaver Untangle review\nPageUp/PageDown scroll review\nReviews use selected workspaces, or all if none selected.\nWorkspace inspection is read-only; Vineweaver requires explicit export.".to_string()
     } else {
         app.review.lines().map(safe).collect::<Vec<_>>().join("\n")
     };
@@ -594,7 +607,7 @@ fn draw(f: &mut Frame, app: &App) {
             if app.editing {
                 "Filter: type, Enter to finish"
             } else {
-                "? help  / filter  Enter open  Space select  o overlaps  p preview  q quit"
+                "? help  / filter  Enter open  Space select  o overlaps  p preview  u Vineweaver  q quit"
             }
         )),
         rows[1],

@@ -8,6 +8,9 @@ mod overlap;
 mod reconcile;
 mod removal;
 mod tui;
+mod untangle;
+mod untangle_export;
+mod untangle_review;
 mod workspace;
 use std::{
     ffi::OsStr,
@@ -26,6 +29,8 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
+    /// Capture, manually group, and validate mixed changes without modifying the workspace
+    Untangle(untangle::Options),
     /// Open the interactive, read-only workspace browser
     Tui,
     /// Create an isolated integration branch from ordered workspaces
@@ -281,6 +286,7 @@ fn status() -> Result<Status> {
 }
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Commands::Untangle(options) => untangle::show(options)?,
         Commands::Tui => tui::run()?,
         Commands::Integrate {
             branch,
