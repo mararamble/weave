@@ -7,6 +7,7 @@ mod integration;
 mod overlap;
 mod reconcile;
 mod removal;
+mod tui;
 mod workspace;
 use std::{
     ffi::OsStr,
@@ -25,6 +26,8 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
+    /// Open the interactive, read-only workspace browser
+    Tui,
     /// Create an isolated integration branch from ordered workspaces
     Integrate {
         #[arg(long)]
@@ -278,6 +281,7 @@ fn status() -> Result<Status> {
 }
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Commands::Tui => tui::run()?,
         Commands::Integrate {
             branch,
             json,
