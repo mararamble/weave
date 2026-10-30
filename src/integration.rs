@@ -527,9 +527,27 @@ struct IntegrationResult {
 fn validate_candidate(
     prepared: &PreparedCandidate,
     args: &[std::ffi::OsString],
+    pass_env: &[String],
 ) -> Result<Option<Validation>> {
     if args.is_empty() {
+        if !pass_env.is_empty() {
+            bail!("--pass-env requires a validation command after --");
+        }
         return Ok(None);
+    }
+    let mut passed = Vec::new();
+    for name in pass_env {
+        if name.is_empty()
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            || name.as_bytes()[0].is_ascii_digit()
+            || name.eq_ignore_ascii_case("HOME")
+            || name.to_ascii_uppercase().starts_with("GIT_")
+        {
+            bail!("Invalid or reserved --pass-env name: {name}");
+        }
+        let value = std::env::var_os(name)
+            .with_context(|| format!("--pass-env variable is not set: {name}"))?;
+        passed.push((name, value));
     }
     let dir = prepared.temp.path();
     let checkout = dir.join("validation-worktree");
@@ -572,6 +590,9 @@ fn validate_candidate(
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }
+    }
+    for (name, value) in passed {
+        command.env(name, value);
     }
     // Direct cooperative Git commands to the disposable repository and index.
     command
@@ -665,6 +686,7 @@ pub(crate) fn integrate(
     names: &[String],
     branch: &str,
     validation_args: &[std::ffi::OsString],
+    pass_env: &[String],
     json: bool,
     include_untracked_content: bool,
 ) -> Result<()> {
@@ -726,7 +748,7 @@ pub(crate) fn integrate(
         prepared.report.target_base,
         names.len()
     );
-    let validation = validate_candidate(&prepared, validation_args)?;
+    let validation = validate_candidate(&prepared, validation_args, pass_env)?;
     prepared.verify_sources()?;
     // Import only objects not already reachable from the source heads/base. No refs
     // are updated by index-pack; a failed operation can leave unreachable objects.

@@ -45,6 +45,9 @@ enum Commands {
         json: bool,
         #[arg(required = true)]
         names: Vec<String>,
+        /// Pass a named parent environment variable to validation (repeatable)
+        #[arg(long = "pass-env")]
+        pass_env: Vec<String>,
         /// Optional validation command and arguments after --
         #[arg(last = true)]
         validation: Vec<std::ffi::OsString>,
@@ -309,11 +312,13 @@ fn main() -> Result<()> {
             json,
             names,
             validation,
+            pass_env,
             include_untracked_content,
         }) => integration::integrate(
             &names,
             &branch,
             &validation,
+            &pass_env,
             json,
             include_untracked_content,
         )?,

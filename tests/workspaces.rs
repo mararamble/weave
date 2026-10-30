@@ -2332,3 +2332,71 @@ fn creation_metadata_write_failure_preserves_pending_recovery_state() {
     );
     git(&p, &["rev-parse", "--verify", "refs/heads/weave/task"]);
 }
+
+#[cfg(unix)]
+#[test]
+fn validation_explicit_environment_is_scoped_and_protected() {
+    let t = tempfile::tempdir().unwrap();
+    let p = t.path().join("repo");
+    let root = t.path().join("spaces");
+    fs::create_dir(&p).unwrap();
+    common::init(&p, "main");
+    fs::write(p.join("file"), "base\n").unwrap();
+    git(&p, &["add", "file"]);
+    git(&p, &["commit", "-m", "base"]);
+    assert!(
+        weave(&p, &root, &["new", "one", "--from", "main"])
+            .status
+            .success()
+    );
+    let run = |args: &[&str]| {
+        common::isolate(&mut Command::new(env!("CARGO_BIN_EXE_weave")))
+            .current_dir(&p)
+            .env("WEAVE_WORKSPACE_DIR", &root)
+            .env("WEAVE_PASS_ONE", "one")
+            .env("WEAVE_PASS_TWO", "two")
+            .env("WEAVE_SECRET", "secret")
+            .args(args)
+            .fixture_output()
+            .unwrap()
+    };
+    let result = run(&[
+        "integrate",
+        "--branch",
+        "review/env",
+        "--pass-env",
+        "WEAVE_PASS_ONE",
+        "--pass-env",
+        "WEAVE_PASS_TWO",
+        "one",
+        "--",
+        "sh",
+        "-c",
+        "test \"$WEAVE_PASS_ONE\" = one && test \"$WEAVE_PASS_TWO\" = two && test -z \"${WEAVE_SECRET+x}\"",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    for name in [
+        "HOME",
+        "GIT_DIR",
+        "GIT_CONFIG_COUNT",
+        "BAD-NAME",
+        "WEAVE_UNSET_VAR_89",
+    ] {
+        let out = run(&[
+            "integrate",
+            "--branch",
+            "review/refused",
+            "--pass-env",
+            name,
+            "one",
+            "--",
+            "true",
+        ]);
+        assert!(!out.status.success(), "{name}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--pass-env"));
+    }
+}
