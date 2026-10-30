@@ -113,6 +113,7 @@ struct App {
     help: bool,
     modal: Option<Modal>,
     mutating: bool,
+    include_untracked_content: bool,
 }
 impl App {
     fn new() -> Self {
@@ -138,6 +139,7 @@ impl App {
             help: false,
             modal: None,
             mutating: false,
+            include_untracked_content: false,
         }
     }
     fn visible(&self) -> Vec<usize> {
@@ -279,6 +281,9 @@ impl App {
             },
         );
         let mut args = vec!["integrate".into(), "--branch".into(), branch];
+        if self.include_untracked_content {
+            args.push("--include-untracked-content".into());
+        }
         args.extend(names);
         if !validation.is_empty() {
             args.push("--".into());
@@ -407,7 +412,11 @@ impl App {
                 self.file_selected = 0;
             }
             self.files_owner = Some(name.clone());
-            self.start(vec!["diff".into(), name, "--json".into()], 1);
+            let mut args = vec!["diff".into(), name, "--json".into()];
+            if self.include_untracked_content {
+                args.push("--include-untracked-content".into());
+            }
+            self.start(args, 1);
         }
     }
     fn show_workspace(&mut self) {
@@ -435,6 +444,9 @@ impl App {
             if plan { "plan" } else { "overlaps" }.into(),
             "--json".into(),
         ];
+        if plan && self.include_untracked_content {
+            args.push("--include-untracked-content".into());
+        }
         args.append(&mut names);
         self.focus = Focus::Review;
         self.diff_file = None;
@@ -478,19 +490,20 @@ impl App {
                 }
             } else {
                 self.review = file.detail;
-                self.message = "Captured untracked content".into();
+                self.message = "Untracked file details".into();
             }
             return;
         }
         self.message = "Streaming diff…".into();
         let tx = self.tx.clone();
+        let include_untracked_content = self.include_untracked_content;
         let cancel = Arc::clone(&self.diff_cancel);
         std::thread::spawn(move || {
             let result = crate::git_process::cancellable(
                 Arc::clone(&cancel),
                 || -> Result<(std::fs::File, u64)> {
                     // Repeat the CLI collector's validation immediately before reading a patch.
-                    let changeset = crate::changeset::collect(&name)?;
+                    let changeset = crate::changeset::collect(&name, include_untracked_content)?;
                     let record = crate::workspace::get(&name)?;
                     let path = path_from_hex(&file.hex)?;
                     let mut cmd =
@@ -925,7 +938,7 @@ impl Drop for TerminalGuard {
         let _ = execute!(io::stdout(), crossterm::cursor::Show, LeaveAlternateScreen);
     }
 }
-pub(crate) fn run() -> Result<()> {
+pub(crate) fn run(include_untracked_content: bool) -> Result<()> {
     use std::io::IsTerminal;
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("The TUI requires an interactive terminal on stdin and stdout");
@@ -933,6 +946,7 @@ pub(crate) fn run() -> Result<()> {
     // Validate repository before changing the terminal.
     crate::git_path("--show-toplevel").context("Run the TUI inside a Git worktree")?;
     let mut app = App::new();
+    app.include_untracked_content = include_untracked_content;
     app.refresh();
     loop {
         enable_raw_mode()?;
@@ -1009,14 +1023,24 @@ pub(crate) fn run() -> Result<()> {
                     KeyCode::Char('t') => {
                         if let Some(name) = app.name() {
                             app.text_command(
-                                vec!["diff".into(), name, "--stat".into()],
+                                {
+                                    let mut args = vec!["diff".into(), name, "--stat".into()];
+                                    if app.include_untracked_content {
+                                        args.push("--include-untracked-content".into());
+                                    }
+                                    args
+                                },
                                 "Diff statistics",
                             );
                         }
                     }
                     KeyCode::Char('J') => {
                         if let Some(name) = app.name() {
-                            app.start(vec!["diff".into(), name, "--json".into()], 3);
+                            let mut args = vec!["diff".into(), name, "--json".into()];
+                            if app.include_untracked_content {
+                                args.push("--include-untracked-content".into());
+                            }
+                            app.start(args, 3);
                         }
                     }
                     KeyCode::Char('i') => app.modal = Some(Modal::IntegrateBranch(String::new())),
@@ -1092,7 +1116,7 @@ pub(crate) fn run() -> Result<()> {
         drop(terminal);
         drop(guard);
         if let Some(name) = vineweaver {
-            if let Err(error) = crate::untangle_review::run_name(name) {
+            if let Err(error) = crate::untangle_review::run_name(name, include_untracked_content) {
                 app.focus = Focus::Review;
                 app.review = format!("Vineweaver failed: {error:#}");
                 app.review_scroll = 0;
@@ -1173,7 +1197,15 @@ fn draw(f: &mut Frame, app: &App) {
                 } else {
                     Color::DarkGray
                 }))
-                .title(format!(" Workspaces /{} ", safe(&app.filter))),
+                .title(format!(
+                    " Workspaces /{}{} ",
+                    safe(&app.filter),
+                    if app.include_untracked_content {
+                        " [untracked content enabled]"
+                    } else {
+                        ""
+                    }
+                )),
         ),
         cols[0],
     );

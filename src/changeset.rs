@@ -395,7 +395,14 @@ pub(crate) fn parse_path_list(bytes: &[u8]) -> Result<Vec<&[u8]>> {
 const FILE_LIMIT: u64 = 1024 * 1024;
 const TOTAL_LIMIT: u64 = 8 * 1024 * 1024;
 fn sensitive(path: &[u8]) -> bool {
-    path.split(|b| *b == b'/').any(|part| {
+    let parts: Vec<_> = path.split(|b| *b == b'/').collect();
+    if parts
+        .windows(2)
+        .any(|p| p[0].eq_ignore_ascii_case(b".docker") && p[1].eq_ignore_ascii_case(b"config.json"))
+    {
+        return true;
+    }
+    parts.into_iter().any(|part| {
         let s = String::from_utf8_lossy(part).to_ascii_lowercase();
         s == ".env"
             || s.starts_with(".env.")
@@ -405,6 +412,10 @@ fn sensitive(path: &[u8]) -> bool {
                     | ".aws"
                     | ".gnupg"
                     | ".netrc"
+                    | ".npmrc"
+                    | ".pypirc"
+                    | ".git-credentials"
+                    | "kubeconfig"
                     | "credentials"
                     | "secrets"
                     | "id_rsa"
@@ -414,6 +425,11 @@ fn sensitive(path: &[u8]) -> bool {
             || s.ends_with(".key")
             || s.ends_with(".p12")
             || s.ends_with(".pfx")
+            || s.ends_with(".p8")
+            || s.ends_with(".keystore")
+            || s.ends_with(".jks")
+            || (s.contains("service-account") && s.ends_with(".json"))
+            || s.starts_with("token")
     })
 }
 #[cfg(unix)]
@@ -513,7 +529,16 @@ fn capture(root: &Path, raw: &[u8], total: &mut u64) -> Change {
     }
     c
 }
-pub(crate) fn collect(name: &str) -> Result<Changeset> {
+fn path_only(raw: &[u8]) -> Change {
+    let mut change = convert(FileChange {
+        kind: ChangeKind::Added,
+        path: raw.to_vec(),
+        previous_path: None,
+    });
+    change.incomplete = Some("untracked content omitted; use --include-untracked-content".into());
+    change
+}
+pub(crate) fn collect(name: &str, include_untracked_content: bool) -> Result<Changeset> {
     let record = workspace::get(name)?;
     let path = Path::new(&record.path);
     let common = run(
@@ -610,7 +635,13 @@ pub(crate) fn collect(name: &str) -> Result<Changeset> {
     let mut total = 0;
     let untracked_changes: Vec<Change> = parse_path_list(&raw)?
         .into_iter()
-        .map(|p| capture(path, p, &mut total))
+        .map(|p| {
+            if include_untracked_content {
+                capture(path, p, &mut total)
+            } else {
+                path_only(p)
+            }
+        })
         .collect();
     aggregate_changes.extend(untracked_changes.iter().cloned());
     let after = String::from_utf8(run(path, &["rev-parse", "--verify", "HEAD"])?)?
@@ -632,7 +663,13 @@ pub(crate) fn collect(name: &str) -> Result<Changeset> {
     let mut verify_total = 0;
     let verify_untracked: Vec<Change> = parse_path_list(&untracked_after)?
         .into_iter()
-        .map(|p| capture(path, p, &mut verify_total))
+        .map(|p| {
+            if include_untracked_content {
+                capture(path, p, &mut verify_total)
+            } else {
+                path_only(p)
+            }
+        })
         .collect();
     if untracked_changes
         .iter()
@@ -684,8 +721,13 @@ pub(crate) fn collect(name: &str) -> Result<Changeset> {
         ],
     })
 }
-pub(crate) fn show(name: &str, stat: bool, json: bool) -> Result<()> {
-    let s = collect(name)?;
+pub(crate) fn show(
+    name: &str,
+    stat: bool,
+    json: bool,
+    include_untracked_content: bool,
+) -> Result<()> {
+    let s = collect(name, include_untracked_content)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&s)?);
         return Ok(());

@@ -118,14 +118,14 @@ fn analyze(a: &Changeset, b: &Changeset, ca: &Change, cb: &Change) -> Overlap {
         Some("rename or copy provenance is ambiguous")
     } else if ca.binary == Some(true) || cb.binary == Some(true) {
         Some("binary file")
+    } else if ca.kind == "added" && cb.kind == "added" {
+        o.classification = "add_add";
+        Some("added files have no shared original regions")
     } else if ca.incomplete.is_some() || cb.incomplete.is_some() {
         Some("file content is incomplete")
     } else if ca.kind == "deleted" || cb.kind == "deleted" {
         o.classification = "delete_modify";
         Some("deleted file has no comparable regions")
-    } else if ca.kind == "added" && cb.kind == "added" {
-        o.classification = "add_add";
-        Some("added files have no shared original regions")
     } else if ca.kind == "added" || cb.kind == "added" {
         Some("addition and another change have ambiguous provenance")
     } else if ca.kind != "modified" || cb.kind != "modified" {
@@ -180,7 +180,7 @@ pub(crate) fn show(requested: &[String], json: bool) -> Result<()> {
     }
     let sets: Vec<Changeset> = names
         .iter()
-        .map(|n| changeset::collect(n))
+        .map(|n| changeset::collect(n, false))
         .collect::<Result<_>>()?;
     let mut overlaps = Vec::new();
     for i in 0..sets.len() {

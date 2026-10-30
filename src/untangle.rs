@@ -8,6 +8,9 @@ use std::{collections::HashSet, path::Path};
 #[derive(Args)]
 pub(crate) struct Options {
     pub name: String,
+    /// Allow capture and export of untracked file content
+    #[arg(long)]
+    pub include_untracked_content: bool,
     /// Open the Vineweaver interactive review session
     #[arg(long, conflicts_with_all = ["json", "export_patches", "export_commits"])]
     pub review: bool,
@@ -149,6 +152,7 @@ pub(crate) struct Engine {
     pub(crate) temp: tempfile::TempDir,
     pub snapshot: Snapshot,
     pub groups: Vec<Group>,
+    include_untracked_content: bool,
 }
 fn diagnostic(code: &str, message: impl Into<String>) -> Diagnostic {
     Diagnostic {
@@ -241,11 +245,11 @@ fn pieces(patch: &[u8]) -> (Vec<Vec<u8>>, &'static str) {
     )
 }
 impl Engine {
-    pub(crate) fn capture(name: &str) -> Result<Self> {
+    pub(crate) fn capture(name: &str, include_untracked_content: bool) -> Result<Self> {
         let record = workspace::get(name)?;
         crate::git_process::ensure_no_filters(Path::new(&record.path))?;
         let before = index_bytes(name)?;
-        let context = changeset::collect(name)?;
+        let context = changeset::collect(name, include_untracked_content)?;
         let temp = isolated::temporary_repository()?;
         let dir = temp.path();
         let commit = isolated::snapshot(dir, &context)?;
@@ -364,6 +368,7 @@ impl Engine {
                 units,
             },
             groups: Vec::new(),
+            include_untracked_content,
         };
         engine.verify_source()?;
         // Every generated unit must reconstruct the exact captured tree; never silently lose content.
@@ -396,7 +401,7 @@ impl Engine {
         let record = workspace::get(name)?;
         crate::git_process::ensure_no_filters(Path::new(&record.path))?;
         let before = index_bytes(name)?;
-        let now = changeset::collect(name)?;
+        let now = changeset::collect(name, self.include_untracked_content)?;
         let commit = isolated::snapshot(self.temp.path(), &now)?;
         let tree = isolated::checked(
             self.temp.path(),
@@ -562,7 +567,7 @@ pub(crate) fn show(options: Options) -> Result<()> {
     if options.review {
         return crate::untangle_review::run(options);
     }
-    let mut engine = Engine::capture(&options.name)?;
+    let mut engine = Engine::capture(&options.name, options.include_untracked_content)?;
     if let Some(expected) = &options.snapshot
         && expected != &engine.snapshot.id
     {

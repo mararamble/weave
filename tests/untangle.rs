@@ -36,15 +36,19 @@ impl Fixture {
         f
     }
     fn run(&self, args: &[&str]) -> Output {
-        common::isolate(&mut Command::new(env!("CARGO_BIN_EXE_weave")))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_weave"));
+        common::isolate(&mut command)
             .current_dir(&self.repo)
-            .env("WEAVE_WORKSPACE_DIR", &self.root)
-            .args(args)
-            .fixture_output()
-            .unwrap()
+            .env("WEAVE_WORKSPACE_DIR", &self.root);
+        command.args(args);
+        // These pre-existing capture and export tests exercise the explicit opt-in path.
+        if args.first() == Some(&"untangle") && !args.contains(&"--include-untracked-content") {
+            command.arg("--include-untracked-content");
+        }
+        command.fixture_output().unwrap()
     }
     fn capture(&self) -> Value {
-        json(self.run(&["untangle", "mixed", "--json"]))
+        json(self.run(&["untangle", "mixed", "--json", "--include-untracked-content"]))
     }
     fn edit(&self) {
         let data = fs::read_to_string(self.work.join("file"))
@@ -206,10 +210,18 @@ fn capture_rejects_filters_large_sensitive_and_index_flags_without_mutation() {
     common::git(&f.work, &["config", "--unset", "filter.bad.clean"]);
     assert_eq!(source(&f), before);
     fs::write(f.work.join("big"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
-    assert!(!f.run(&["untangle", "mixed"]).status.success());
+    assert!(
+        !f.run(&["untangle", "mixed", "--include-untracked-content"])
+            .status
+            .success()
+    );
     fs::remove_file(f.work.join("big")).unwrap();
     fs::write(f.work.join(".env"), "SECRET").unwrap();
-    assert!(!f.run(&["untangle", "mixed"]).status.success());
+    assert!(
+        !f.run(&["untangle", "mixed", "--include-untracked-content"])
+            .status
+            .success()
+    );
     fs::remove_file(f.work.join(".env")).unwrap();
     common::git(&f.work, &["update-index", "--assume-unchanged", "file"]);
     assert!(!f.run(&["untangle", "mixed"]).status.success());

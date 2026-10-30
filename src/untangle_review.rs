@@ -37,7 +37,7 @@ struct Capture {
     plan: Plan,
 }
 enum Job {
-    Capture(String, Arc<AtomicBool>),
+    Capture(String, bool, Arc<AtomicBool>),
     Validate(u64, Plan, Arc<AtomicBool>),
     Export(u64, Plan, PathBuf, Kind, bool, Arc<AtomicBool>),
 }
@@ -90,9 +90,9 @@ fn worker(rx: Receiver<Job>, tx: Sender<Message>) {
     let mut engine: Option<Engine> = None;
     while let Ok(job) = rx.recv() {
         match job {
-            Job::Capture(name, flag) => {
+            Job::Capture(name, include_untracked_content, flag) => {
                 let result = crate::git_process::cancellable(flag, || {
-                    let next = Engine::capture(&name)?;
+                    let next = Engine::capture(&name, include_untracked_content)?;
                     let data = captured(&next);
                     engine = Some(next);
                     Ok(data)
@@ -175,6 +175,7 @@ struct App {
     tx: Sender<Job>,
     rx: Receiver<Message>,
     name: String,
+    include_untracked_content: bool,
 }
 impl App {
     fn new(name: String, tx: Sender<Job>, rx: Receiver<Message>) -> Self {
@@ -199,6 +200,7 @@ impl App {
             tx,
             rx,
             name,
+            include_untracked_content: false,
         }
     }
     fn token(&mut self) -> Arc<AtomicBool> {
@@ -216,7 +218,11 @@ impl App {
         self.validation = "Capture pending/incomplete".into();
         self.message = "Capturing… Esc cancels; q quits".into();
         let flag = self.token();
-        let _ = self.tx.send(Job::Capture(self.name.clone(), flag));
+        let _ = self.tx.send(Job::Capture(
+            self.name.clone(),
+            self.include_untracked_content,
+            flag,
+        ));
     }
     fn checkpoint(&mut self) {
         if let Some(plan) = &self.plan {
@@ -696,6 +702,7 @@ pub(crate) fn run(options: Options) -> Result<()> {
     let (tx_worker, rx) = mpsc::channel();
     let handle = std::thread::spawn(move || worker(rx_worker, tx_worker));
     let mut app = App::new(options.name, tx, rx);
+    app.include_untracked_content = options.include_untracked_content;
     let result = (|| -> Result<()> {
         enable_raw_mode()?;
         let _guard = crate::tui::TerminalGuard;
@@ -730,9 +737,10 @@ pub(crate) fn run(options: Options) -> Result<()> {
     result
 }
 
-pub(crate) fn run_name(name: String) -> Result<()> {
+pub(crate) fn run_name(name: String, include_untracked_content: bool) -> Result<()> {
     run(Options {
         name,
+        include_untracked_content,
         review: true,
         json: false,
         snapshot: None,

@@ -15,10 +15,15 @@ struct Terminal {
     slave: fs::File,
     initial: libc::termios,
     output: Vec<u8>,
+    seen: Vec<u8>,
 }
 impl Terminal {
     fn new(repo: &Path, spaces: &Path) -> Self {
+        Self::with_args(repo, spaces, &[])
+    }
+    fn with_args(repo: &Path, spaces: &Path, args: &[&str]) -> Self {
         let (mut master_fd, mut slave_fd) = (-1, -1);
+        #[cfg_attr(target_os = "linux", allow(unused_mut))]
         let mut size = libc::winsize {
             ws_row: 30,
             ws_col: 140,
@@ -58,6 +63,7 @@ impl Terminal {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_weave"));
         let child = common::isolate(&mut cmd)
             .current_dir(repo)
+            .args(args)
             .env("HOME", home)
             .env("XDG_CONFIG_HOME", home)
             .env("WEAVE_WORKSPACE_DIR", spaces)
@@ -73,6 +79,7 @@ impl Terminal {
             slave,
             initial,
             output: Vec::new(),
+            seen: Vec::new(),
         }
     }
     fn read(&mut self) {
@@ -82,6 +89,7 @@ impl Terminal {
                 break;
             }
             self.output.extend_from_slice(&bytes[..n]);
+            self.seen.extend_from_slice(&bytes[..n]);
         }
     }
     fn wait_for(&mut self, needle: &str) {
@@ -240,7 +248,7 @@ fn ordered_integration_accepts_validation_argv_and_preserves_sources() {
         );
         fs::write(spaces.join(name).join(name), name).unwrap();
     }
-    let mut terminal = Terminal::new(&repo, &spaces);
+    let mut terminal = Terminal::with_args(&repo, &spaces, &["tui", "--include-untracked-content"]);
     terminal.wait_for("2 workspaces; Enter opens files");
     terminal.send(b"j k ");
     terminal.send(b"i");
@@ -329,6 +337,26 @@ fn large_diff_is_paged_past_two_mebibytes() {
 }
 
 #[test]
+fn untracked_content_is_hidden_in_tui_by_default() {
+    let (_temp, repo, spaces) = fixture();
+    assert!(
+        weave(&repo, &spaces, &["new", "task", "--from", "HEAD"])
+            .status
+            .success()
+    );
+    fs::write(spaces.join("task/private"), "not displayed").unwrap();
+    let mut terminal = Terminal::new(&repo, &spaces);
+    terminal.wait_for("1 workspaces; Enter opens files");
+    terminal.send(b"\r");
+    terminal.wait_for("Enter opens diff");
+    terminal.send(b"\r");
+    terminal.wait_for("untracked content omitted");
+    assert!(!String::from_utf8_lossy(&terminal.seen).contains("not displayed"));
+    terminal.send(b"qq");
+    terminal.finish();
+}
+
+#[test]
 fn unusual_untracked_filename_and_content_are_browsable() {
     let (_temp, repo, spaces) = fixture();
     assert!(
@@ -338,7 +366,7 @@ fn unusual_untracked_filename_and_content_are_browsable() {
     );
     let path = spaces.join("task").join("name\nwith space");
     fs::write(&path, b"visible content\n").unwrap();
-    let mut terminal = Terminal::new(&repo, &spaces);
+    let mut terminal = Terminal::with_args(&repo, &spaces, &["tui", "--include-untracked-content"]);
     terminal.wait_for("1 workspaces; Enter opens files");
     terminal.send(b"\r");
     terminal.wait_for("Enter opens diff");
@@ -347,6 +375,25 @@ fn unusual_untracked_filename_and_content_are_browsable() {
     terminal.send(b"qq");
     terminal.finish();
     assert_eq!(fs::read(path).unwrap(), b"visible content\n");
+}
+
+#[test]
+fn tui_opt_in_is_preserved_when_opening_vineweaver() {
+    let (_temp, repo, spaces) = fixture();
+    assert!(
+        weave(&repo, &spaces, &["new", "task", "--from", "HEAD"])
+            .status
+            .success()
+    );
+    fs::write(spaces.join("task/new"), "visible in review\n").unwrap();
+    let mut terminal = Terminal::with_args(&repo, &spaces, &["tui", "--include-untracked-content"]);
+    terminal.wait_for("1 workspaces; Enter opens files");
+    terminal.send(b"u");
+    terminal.wait_for("visible in review");
+    terminal.send(b"q");
+    terminal.wait_for("Workspaces");
+    terminal.send(b"q");
+    terminal.finish();
 }
 
 #[test]

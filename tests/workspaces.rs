@@ -207,7 +207,11 @@ fn diff_binary_rename_delete_and_untracked_safety() {
     fs::write(w.join(".env"), "SECRET=do-not-expose").unwrap();
     fs::write(w.join("ignored"), "ignored-content").unwrap();
     fs::write(w.join("big"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
-    let out = weave(&p, &root, &["diff", "test", "--json"]);
+    let out = weave(
+        &p,
+        &root,
+        &["diff", "test", "--json", "--include-untracked-content"],
+    );
     assert!(
         out.status.success(),
         "{}",
@@ -266,7 +270,7 @@ fn detects_untracked_file_changed_during_collection() {
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
     let out = common::isolate(&mut Command::new(env!("CARGO_BIN_EXE_weave")))
         .current_dir(&p)
-        .args(["diff", "task", "--json"])
+        .args(["diff", "task", "--json", "--include-untracked-content"])
         .env("PATH", &bin)
         .env("WEAVE_RACE_MARKER", t.path().join("marker"))
         .env("WEAVE_RACE_FILE", w.join("new"))
@@ -412,7 +416,17 @@ fn plan_commits_detects_conflicts_and_preserves_sources() {
         .fixture_output()
         .unwrap()
         .stdout;
-    let result = weave(&p, &root, &["plan", "one", "two", "--json"]);
+    let result = weave(
+        &p,
+        &root,
+        &[
+            "plan",
+            "one",
+            "two",
+            "--json",
+            "--include-untracked-content",
+        ],
+    );
     assert!(
         result.status.success(),
         "{}",
@@ -436,7 +450,17 @@ fn plan_commits_detects_conflicts_and_preserves_sources() {
             .stdout
     );
     fs::write(two.join("dirty"), "untracked").unwrap();
-    let dirty = weave(&p, &root, &["plan", "one", "two", "--json"]);
+    let dirty = weave(
+        &p,
+        &root,
+        &[
+            "plan",
+            "one",
+            "two",
+            "--json",
+            "--include-untracked-content",
+        ],
+    );
     assert!(
         dirty.status.success(),
         "{}",
@@ -509,7 +533,17 @@ fn plan_includes_dirty_layers_and_rejects_incomplete_capture() {
     fs::write(one.join("odd\nname"), b"new\0binary").unwrap();
     fs::write(two.join("file"), "final two\n").unwrap();
     let index_before = fs::read(git_dir(&one).join("index")).unwrap();
-    let result = weave(&p, &root, &["plan", "one", "two", "--json"]);
+    let result = weave(
+        &p,
+        &root,
+        &[
+            "plan",
+            "one",
+            "two",
+            "--json",
+            "--include-untracked-content",
+        ],
+    );
     assert!(
         result.status.success(),
         "{}",
@@ -525,7 +559,17 @@ fn plan_includes_dirty_layers_and_rejects_incomplete_capture() {
     assert_eq!(fs::read(one.join("file")).unwrap(), b"final one\n");
     assert_eq!(fs::read(one.join("odd\nname")).unwrap(), b"new\0binary");
     fs::write(two.join(".env"), "secret").unwrap();
-    let incomplete = weave(&p, &root, &["plan", "one", "two", "--json"]);
+    let incomplete = weave(
+        &p,
+        &root,
+        &[
+            "plan",
+            "one",
+            "two",
+            "--json",
+            "--include-untracked-content",
+        ],
+    );
     assert!(!incomplete.status.success());
     assert!(incomplete.stdout.is_empty());
     assert!(String::from_utf8_lossy(&incomplete.stderr).contains("sensitive path excluded"));
@@ -553,7 +597,11 @@ fn plan_snapshot_tree_matches_final_dirty_contents_and_blocks_filters() {
     fs::write(one.join("file"), "final\n").unwrap();
     fs::remove_file(one.join("gone")).unwrap();
     fs::write(one.join("new file"), b"binary\0bytes").unwrap();
-    let out = weave(&p, &root, &["plan", "one", "--json"]);
+    let out = weave(
+        &p,
+        &root,
+        &["plan", "one", "--json", "--include-untracked-content"],
+    );
     assert!(
         out.status.success(),
         "{}",
@@ -584,7 +632,11 @@ fn plan_snapshot_tree_matches_final_dirty_contents_and_blocks_filters() {
             "touch /tmp/weave-should-not-run",
         ],
     );
-    let blocked = weave(&p, &root, &["plan", "one", "--json"]);
+    let blocked = weave(
+        &p,
+        &root,
+        &["plan", "one", "--json", "--include-untracked-content"],
+    );
     assert!(!blocked.status.success());
     assert!(blocked.stdout.is_empty());
     let diagnostic = String::from_utf8_lossy(&blocked.stderr);
@@ -683,7 +735,17 @@ fn plan_dirty_add_add_and_hidden_index_entries() {
         );
         fs::write(root.join(name).join("new\nfile"), format!("{name}\n")).unwrap();
     }
-    let result = weave(&p, &root, &["plan", "one", "two", "--json"]);
+    let result = weave(
+        &p,
+        &root,
+        &[
+            "plan",
+            "one",
+            "two",
+            "--json",
+            "--include-untracked-content",
+        ],
+    );
     assert!(
         result.status.success(),
         "{}",
@@ -701,7 +763,17 @@ fn plan_dirty_add_add_and_hidden_index_entries() {
         &root.join("one"),
         &["update-index", "--assume-unchanged", "tracked"],
     );
-    let result = weave(&p, &root, &["plan", "one", "two", "--json"]);
+    let result = weave(
+        &p,
+        &root,
+        &[
+            "plan",
+            "one",
+            "two",
+            "--json",
+            "--include-untracked-content",
+        ],
+    );
     assert!(!result.status.success());
     assert!(result.stdout.is_empty());
     assert!(String::from_utf8_lossy(&result.stderr).contains("assume-unchanged"));
@@ -860,6 +932,7 @@ fn integrate_creates_branch_from_dirty_candidate_and_runs_validation() {
             "--branch",
             "review/test",
             "--json",
+            "--include-untracked-content",
             "one",
             "two",
             "--",
@@ -920,6 +993,63 @@ fn integrate_creates_branch_from_dirty_candidate_and_runs_validation() {
     assert_eq!(fs::read(one.join("file")).unwrap(), b"dirty final\n");
     let duplicate = weave(&p, &root, &["integrate", "--branch", "review/test", "one"]);
     assert!(!duplicate.status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn integrate_validation_uses_a_minimal_environment_and_disposable_home() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    let spaces = temp.path().join("spaces");
+    let parent_home = temp.path().join("parent-home");
+    fs::create_dir(&repo).unwrap();
+    fs::create_dir(&parent_home).unwrap();
+    common::init(&repo, "trunk");
+    fs::write(repo.join("file"), "base\n").unwrap();
+    git(&repo, &["add", "file"]);
+    git(&repo, &["commit", "-m", "base"]);
+    assert!(
+        weave(&repo, &spaces, &["new", "one", "--from", "trunk"])
+            .status
+            .success()
+    );
+
+    let script = r#"
+        test -z "${WEAVE_TEST_SECRET+x}" || exit 1
+        test -d "$HOME" && test "$HOME" != "$1" || exit 2
+        test -n "$PATH" && test "$LC_ALL" = C || exit 3
+        test "$(git rev-parse --show-toplevel)" = "$PWD" || exit 4
+        test "$(git config --get core.hooksPath)" = /dev/null || exit 5
+    "#;
+    let output = common::isolate(&mut Command::new(env!("CARGO_BIN_EXE_weave")))
+        .current_dir(&repo)
+        .env("WEAVE_WORKSPACE_DIR", &spaces)
+        .env("HOME", &parent_home)
+        .env("LC_ALL", "C")
+        .env("WEAVE_TEST_SECRET", "parent-secret")
+        .args([
+            "integrate",
+            "--branch",
+            "review/environment",
+            "--json",
+            "one",
+            "--",
+            "sh",
+            "-c",
+            script,
+            "validation",
+            parent_home.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["validation"]["exit_code"], 0);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("parent-secret"));
 }
 
 #[test]

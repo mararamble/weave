@@ -32,7 +32,11 @@ enum Commands {
     /// Capture, manually group, and validate mixed changes without modifying the workspace
     Untangle(untangle::Options),
     /// Open the interactive workspace browser
-    Tui,
+    Tui {
+        /// Allow capture of untracked file content throughout this session
+        #[arg(long)]
+        include_untracked_content: bool,
+    },
     /// Create an isolated integration branch from ordered workspaces
     Integrate {
         #[arg(long)]
@@ -44,6 +48,9 @@ enum Commands {
         /// Optional validation command and arguments after --
         #[arg(last = true)]
         validation: Vec<std::ffi::OsString>,
+        /// Allow capture of untracked file content
+        #[arg(long)]
+        include_untracked_content: bool,
     },
     /// Preview or remove a clean managed worktree; its branch is retained
     Remove {
@@ -61,6 +68,9 @@ enum Commands {
     },
     /// Preview ordered integration of committed workspace changes
     Plan {
+        /// Allow capture of untracked file content
+        #[arg(long)]
+        include_untracked_content: bool,
         #[arg(long)]
         json: bool,
         #[arg(required = true)]
@@ -75,6 +85,9 @@ enum Commands {
     /// Collect changes in a managed workspace
     Diff {
         name: String,
+        /// Allow capture of untracked file content
+        #[arg(long)]
+        include_untracked_content: bool,
         #[arg(long, conflicts_with = "json")]
         stat: bool,
         #[arg(long)]
@@ -286,20 +299,38 @@ fn status() -> Result<Status> {
 }
 fn main() -> Result<()> {
     match Cli::parse().command {
-        None => tui::run()?,
+        None => tui::run(false)?,
         Some(Commands::Untangle(options)) => untangle::show(options)?,
-        Some(Commands::Tui) => tui::run()?,
+        Some(Commands::Tui {
+            include_untracked_content,
+        }) => tui::run(include_untracked_content)?,
         Some(Commands::Integrate {
             branch,
             json,
             names,
             validation,
-        }) => integration::integrate(&names, &branch, &validation, json)?,
+            include_untracked_content,
+        }) => integration::integrate(
+            &names,
+            &branch,
+            &validation,
+            json,
+            include_untracked_content,
+        )?,
         Some(Commands::Remove { name, dry_run, yes }) => removal::remove(&name, dry_run, yes)?,
         Some(Commands::Reconcile { json }) => reconcile::show(json)?,
-        Some(Commands::Plan { json, names }) => integration::show(&names, json)?,
+        Some(Commands::Plan {
+            json,
+            names,
+            include_untracked_content,
+        }) => integration::show(&names, json, include_untracked_content)?,
         Some(Commands::Overlaps { json, names }) => overlap::show(&names, json)?,
-        Some(Commands::Diff { name, stat, json }) => changeset::show(&name, stat, json)?,
+        Some(Commands::Diff {
+            name,
+            stat,
+            json,
+            include_untracked_content,
+        }) => changeset::show(&name, stat, json, include_untracked_content)?,
         Some(Commands::New { name, from }) => workspace::create(&name, &from)?,
         Some(Commands::List { json }) => workspace::list(json)?,
         Some(Commands::Status { json }) => {

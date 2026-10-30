@@ -39,6 +39,34 @@ pub(crate) fn validate(name: &str) -> Result<()> {
     }
     Ok(())
 }
+// Git lists the primary worktree first. For bare repositories and separate Git
+// directories Git may report the common directory itself; that is the only
+// stable shared anchor visible from every linked worktree in those layouts.
+fn default_workspace_root(common: &Path) -> Result<PathBuf> {
+    let worktrees = parse_worktrees(&git(["worktree", "list", "--porcelain", "-z"])?)?;
+    let primary = worktrees
+        .first()
+        .context("Git did not report a primary worktree")?;
+    let anchor = primary.path.canonicalize().with_context(
+        || "Cannot resolve the primary worktree; set WEAVE_WORKSPACE_DIR explicitly",
+    )?;
+    let parent = anchor.parent().context(
+        "Cannot locate a parent for the primary worktree; set WEAVE_WORKSPACE_DIR explicitly",
+    )?;
+    let mut name = anchor
+        .file_name()
+        .context("Cannot name a workspace parent; set WEAVE_WORKSPACE_DIR explicitly")?
+        .to_os_string();
+    name.push(".weave");
+    let root = parent.join(name);
+    if root.starts_with(common) {
+        bail!(
+            "Default workspace root is inside the Git common directory; set WEAVE_WORKSPACE_DIR explicitly"
+        );
+    }
+    Ok(root)
+}
+
 pub fn create(name: &str, from: &str) -> Result<()> {
     validate(name)?;
     let common = git_path("--git-common-dir")?;
@@ -50,13 +78,34 @@ pub fn create(name: &str, from: &str) -> Result<()> {
     .trim()
     .to_string();
     let branch = format!("weave/{name}");
-    let root = match std::env::var_os("WEAVE_WORKSPACE_DIR") {
+    let override_root = std::env::var_os("WEAVE_WORKSPACE_DIR");
+    let root = match &override_root {
         Some(p) => PathBuf::from(p),
-        None => common.join("weave-workspaces"),
+        None => default_workspace_root(&common)?,
     };
+    if override_root.is_none() {
+        match fs::symlink_metadata(&root) {
+            Ok(info) if !info.is_dir() || info.file_type().is_symlink() => {
+                bail!(
+                    "Default workspace root is not a directory or is a symlink: {}",
+                    root.display()
+                );
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).context("Cannot inspect default workspace root"),
+        }
+    }
     fs::create_dir_all(&root)
         .with_context(|| format!("Cannot create workspace root {}", root.display()))?;
-    let root = root.canonicalize()?;
+    let resolved_root = root.canonicalize()?;
+    if override_root.is_none() && (resolved_root != root || resolved_root.starts_with(&common)) {
+        bail!(
+            "Unsafe default workspace root {}; set WEAVE_WORKSPACE_DIR explicitly",
+            root.display()
+        );
+    }
+    let root = resolved_root;
     let path = root.join(name);
     if path.symlink_metadata().is_ok() {
         bail!("Destination already exists: {}", path.display());

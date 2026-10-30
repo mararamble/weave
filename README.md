@@ -118,7 +118,7 @@ Make sure that directory is available on your `PATH`.
 
 ### Terminal interface
 
-Run `weave` (or `weave tui`) inside a Git worktree on an interactive terminal. Navigate with `j`/`k` or the arrow keys, change panes with `h`/`l` or Tab, and press `Enter` to open a workspace or file. `/` filters workspaces, Space marks them in the order used for planning and integration, `o` reviews overlaps, `p` previews integration, and `u` opens Vineweaver. `s` shows repository status, `w` shows the selected workspace details, and `c` reconciles worktrees. `t` shows diff statistics, `J` shows diff JSON, and `[`/`]` page through large captured patches or untracked content. `n` creates a workspace, `D` previews removal, `d` removes the selected workspace, and `i` creates an integration branch. Integration accepts an optional validation executable and its arguments, entered one at a time; these run directly without a shell; F2 adds an empty argument. These mutations require confirmation; Esc cancels. `:` opens the action palette, `?` shows shortcuts, `r` refreshes, and `q` returns to the workspace pane or exits. Integration uses workspaces in marking order, or all workspaces in listing order when none are marked. On narrow terminals the active pane fills the screen.
+Run `weave` (or `weave tui`) inside a Git worktree on an interactive terminal. To opt in to untracked content capture for the session, run `weave tui --include-untracked-content`; this also applies to planning, integration and Vineweaver. Navigate with `j`/`k` or the arrow keys, change panes with `h`/`l` or Tab, and press `Enter` to open a workspace or file. `/` filters workspaces, Space marks them in the order used for planning and integration, `o` reviews overlaps, `p` previews integration, and `u` opens Vineweaver. `s` shows repository status, `w` shows the selected workspace details, and `c` reconciles worktrees. `t` shows diff statistics, `J` shows diff JSON, and `[`/`]` page through large captured patches or untracked content. `n` creates a workspace, `D` previews removal, `d` removes the selected workspace, and `i` creates an integration branch. Integration accepts an optional validation executable and its arguments, entered one at a time; these run directly without a shell; F2 adds an empty argument. These mutations require confirmation; Esc cancels. `:` opens the action palette, `?` shows shortcuts, `r` refreshes, and `q` returns to the workspace pane or exits. Integration uses workspaces in marking order, or all workspaces in listing order when none are marked. On narrow terminals the active pane fills the screen.
 
 The CLI remains available for automation and JSON. Current CLI/TUI parity audit (WEV-36):
 
@@ -129,7 +129,7 @@ The CLI remains available for automation and JSON. Current CLI/TUI parity audit 
 | [x] `reconcile [--json]` | `c` shows the reconciliation report. |
 | [x] `new NAME --from REF` | `n` prompts for the name and base, then confirms creation. |
 | [x] `remove NAME [--dry-run\|--yes]` | `D` previews removal; `d` confirms it and runs the same validation. |
-| [x] `diff NAME [--stat\|--json]` | Workspace files and tracked patches are browsable; captured untracked content is displayed as text or hex; `t` and `J` open statistics and JSON. Tracked patches are spooled to a temporary file and browsed in pages. Existing collector limits still apply. |
+| [x] `diff NAME [--stat\|--json]` | Workspace files and tracked patches are browsable; untracked content is displayed as text or hex only when explicitly enabled; `t` and `J` open statistics and JSON. Tracked patches are spooled to a temporary file and browsed in pages. Existing collector limits still apply. |
 | [x] `overlaps [--json] [NAMES...]` | `o` reviews marked workspaces, or all workspaces. |
 | [x] `plan [--json] NAMES...` | `p` previews marked workspaces in selection order, or all workspaces. |
 | [x] `integrate --branch BRANCH [--json] NAMES... [-- VALIDATION...]` | Available for marked workspaces in selection order, or all workspaces, with optional validation arguments. |
@@ -241,6 +241,8 @@ weave untangle auth --snapshot SNAPSHOT_ID \
 # Optional: --unassign UNIT_ID_1 (processed after assignments)
 ```
 
+If a workspace has untracked files, Untangle refuses capture unless `--include-untracked-content` is explicitly supplied on every invocation. Opted-in untracked bytes can appear in snapshot JSON, patches and portable bundles; exclusions below still apply.
+
 `weave untangle NAME` prints a read-only preview with unit IDs, hunk ranges, group assignments, unassigned count, applicability, and warnings. JSON version 1 includes `snapshot`, `groups`, `unassigned`, `selection_complete`, `sequence_applicable`, `applications`, and typed `warnings`. The versioned snapshot contains the recorded base commit, captured tree identity, completeness, existing changeset context (committed/staged/unstaged/untracked), files and units. Units contain exact `path_hex` and `patch_hex`, a display path, a hunk range where applicable, and `ownership: "unknown"`. The final diff establishes no authorship.
 
 Each invocation recaptures the workspace. Assignments require `--snapshot` and full unit IDs from the same capture; a changed HEAD, source index, tracked/untracked content, or collection context invalidates them. Group names must be unique and nonempty. Repeated assignments are rejected; `--unassign` clears an assignment. Assignment argument order does not affect unit order. Groups run in creation order unless `--order` supplies every group exactly once. Grouping is held in memory for this invocation; persist the command arguments to replay it against an unchanged capture. There is no saved editable snapshot file yet.
@@ -312,7 +314,7 @@ Disposable-repository coverage includes independent same-file groups, indivisibl
 
 ## Integration planning
 
-`weave plan task-a task-b --json` previews the selected workspaces in the given order, starting at the first workspace's recorded creation commit. It includes committed changes and the final tracked working-tree state (including staged and unstaged changes), plus safely captured untracked files. Each workspace's base and HEAD are recorded. The preview uses a private index and object database and `git merge-tree --write-tree`; it does not update source trees, indexes, branches, or refs. It stops the merge sequence at the first conflict. Git must support `merge-tree --write-tree` and `rev-parse --show-object-format`.
+`weave plan task-a task-b --json` previews the selected workspaces in the given order, starting at the first workspace's recorded creation commit. It includes committed changes and the final tracked working-tree state (including staged and unstaged changes). A workspace with untracked files requires `--include-untracked-content`; planning refuses rather than silently omitting them. Each workspace's base and HEAD are recorded. The preview uses a private index and object database and `git merge-tree --write-tree`; it does not update source trees, indexes, branches, or refs. It stops the merge sequence at the first conflict. Git must support `merge-tree --write-tree` and `rev-parse --show-object-format`.
 
 Plan JSON schema version 1 contains `schema_version`, `target_base`, `status` (`clean` or `conflict`), `selected_workspaces`, ordered processed `steps`, and `warnings`. Each step records workspace, creation base, HEAD, status, staged/unstaged/untracked counts, temporary tree ID, and nullable Git conflict details. Steps after the first conflict are not evaluated. Tree IDs refer to temporary objects and are informational only; they disappear when the command exits. A conflict is a successfully computed plan and exits zero. Operational errors exit nonzero and produce no JSON plan.
 
@@ -329,7 +331,7 @@ weave integrate --branch review/tested --json auth parser -- cargo test
 
 `weave integrate` captures and merges the named workspaces in order, starting from the first workspace's creation base. It builds a fresh candidate and stops before branch creation on conflicts, incomplete snapshots, detected source changes, or failed validation. The target branch must be new; creation uses an atomic create-only ref update. Original workspaces and source branches are not modified. The result is a branch ref, not a checked-out worktree. Create a separate Git worktree or check it out when ready to review.
 
-The optional command after `--` is executed directly with its arguments in a disposable checkout of the candidate. Only supply commands you trust: validation executes code with your user permissions and can access files and the network. Git commands in validation are directed to the disposable Git state. Changes made in the validation checkout are not included in the branch; tracked modifications are reported. Stdout and stderr are each capped at 64 KiB, and failure creates no branch. Temporary validation state is cleaned up when the command exits normally.
+The optional command after `--` is executed directly with its arguments in a disposable checkout of the candidate. Only supply commands you trust: validation executes code with your user permissions and can access files and the network. It receives a cleared environment with the inherited `PATH` and selected locale variables, a disposable `HOME`, and Git variables directing cooperative Git commands to the disposable Git state. This is not a sandbox; see [validation command security](docs/security.md). Tools depending on user configuration may need explicit configuration: for example, a rustup proxy may not find its toolchain with the temporary `HOME`, so supply a `PATH` to an installed toolchain's `bin` directory when invoking validation. Changes made in the validation checkout are not included in the branch; tracked modifications are reported. Stdout and stderr are each capped at 64 KiB, and failure creates no branch. Temporary validation state is cleaned up when the command exits normally.
 
 JSON schema version 1 reports `branch`, `commit`, `tree`, `target_base`, ordered `sources` with each base, HEAD, snapshot commit and included source commit IDs, nullable `validation`, and `warnings`. Snapshot and integration commits are synthetic commits on the review branch; source branch commits are not rewritten. Validation arguments are displayed lossily if they contain non-UTF-8 bytes. A clean merge does not imply semantic compatibility.
 
@@ -346,17 +348,14 @@ Weave uses Git's existing worktree functionality to give independent development
 For example:
 
 ```text
-my-project/
-│
-├── main workspace
-│
-└── .git/
-    └── weave-workspaces/
-        ├── auth/
-        └── parser/
+my-project/             # primary worktree
+└── .git/               # Weave metadata remains here
+my-project.weave/       # default workspace parent
+├── auth/
+└── parser/
 ```
 
-This diagram is conceptual; the exact workspace location depends on the repository's Git common directory and Weave configuration.
+The exact workspace location depends on the primary worktree, repository layout and Weave configuration.
 
 Each workspace has:
 
@@ -409,8 +408,10 @@ Keep startup responsive, limit unnecessary processing, use bounded operations, a
 By default, managed workspaces live under:
 
 ```text
-<Git common directory>/weave-workspaces/
+<primary-worktree-parent>/<primary-worktree-name>.weave/
 ```
+
+Git reports the same primary anchor from linked worktrees, so they share this default. For bare repositories and separate Git directories where Git reports the common directory as the primary anchor, the default is a sibling named `<common-directory-name>.weave`. The resolved default must be outside the common directory; an unsafe or symlinked default is refused. Existing workspaces at the former `<Git common directory>/weave-workspaces/` location continue to use their recorded paths.
 
 Override the parent directory using:
 
@@ -543,7 +544,7 @@ Nullable fields represent unavailable or inapplicable information.
 
 Tracked content is exposed through the human-readable patch output rather than embedded as raw bytes in JSON.
 
-For successfully captured untracked regular files, `content_hex` contains their raw bytes.
+By default `content_hex` is null for untracked files. With `--include-untracked-content`, it contains raw bytes for successfully captured untracked regular files.
 
 The change categories represent different Git layers, so a path can appear in more than one category. Use `aggregate_changes` to avoid double-counting the final change state.
 
@@ -593,7 +594,7 @@ Weave is still pre-alpha software. Avoid relying on it as the only record of val
 
 ### Untracked file capture
 
-Ignored files are excluded.
+Ignored files are excluded. By default, `diff` and `overlaps` report untracked paths without reading contents. `plan`, `integrate`, and `untangle` refuse workspaces with untracked files rather than omit them; pass `--include-untracked-content` to opt in to capture. Use the same flag on each Untangle invocation or start `weave tui --include-untracked-content` for an interactive session. Captured content can be displayed, written to integration commits, and included in Untangle patches or bundles.
 
 Untracked reads exclude sensitive filenames and directories including:
 
@@ -604,6 +605,11 @@ Untracked reads exclude sensitive filenames and directories including:
 .aws
 .gnupg
 .netrc
+.npmrc
+.pypirc
+.git-credentials
+.docker/config.json
+kubeconfig
 credentials
 secrets
 id_rsa
@@ -612,6 +618,11 @@ id_ed25519
 *.key
 *.p12
 *.pfx
+*.p8
+*.keystore
+*.jks
+*service-account*.json
+token*
 ```
 
 Exclusions are case-insensitive.
@@ -634,7 +645,7 @@ Incomplete captures are indicated in the results rather than silently treated as
 
 ### Concurrent modifications
 
-Changeset collection checks HEAD, tracked changes, index changes, and untracked content twice, rejecting detected inconsistencies.
+Changeset collection checks HEAD, tracked changes, index changes, and untracked paths twice; opted-in untracked content is also checked twice. Detected inconsistencies are rejected.
 
 However, this is **not an atomic filesystem snapshot**.
 
@@ -682,13 +693,13 @@ Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and
 | Phase | Focus | Status |
 |---|---|---|
 | 01 | Repository discovery | Implemented |
-| 02 | Managed worktrees, reconciliation and confirmed removal | Implemented; hosted CI and safety review pending |
-| 03 | Diff collection and overlap detection | Implemented |
-| 04 | Non-destructive integration planning and review branches | Implemented |
+| 02 | Managed worktrees, reconciliation and confirmed removal (new workspaces default outside Git metadata) | Implemented, verification pending: safety review; latest hosted CI fails on Ubuntu Clippy |
+| 03 | Diff collection and overlap detection | Implemented; untracked content capture is opt-in |
+| 04 | Non-destructive integration planning and review branches | Implemented; untracked content requires opt-in; validation uses a minimal environment but is not sandboxed |
 | 05 | Ratatui terminal interface | Implemented; local and SSH launch/create/exit smoke tests passed |
 | 05c | TUI-first parity and keyboard workflows (WEV-36) | Implemented: ordered review and integration, confirmed mutations, paged diffs, keyboard palette, narrow layouts, local and SSH smoke tests; limits documented |
-| 06 | Vineweaver Untangle engine | Implemented: snapshot-scoped hunk/whole-file assignment and isolated validation |
-| 06b | Vineweaver review and export (WEV-18) | Implemented: local TUI review, ordering/undo, verified patch and independent-commit bundle exports; SSH verification pending |
+| 06 | Vineweaver Untangle engine | Implemented: snapshot-scoped hunk/whole-file assignment and isolated validation; untracked content requires opt-in |
+| 06b | Vineweaver review and export (WEV-18) | Implemented, SSH verification pending: local TUI review, ordering/undo, verified patch and independent-commit bundle exports |
 | 07 | SSH remote linking | Planned |
 | 08 | Remote uncommitted snapshots | Planned |
 | 09 | Distributed integration | Planned |

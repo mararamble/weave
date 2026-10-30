@@ -298,12 +298,13 @@ struct PreparedCandidate {
     candidate_commit: String,
     snapshots: Vec<String>,
     sources: Vec<changeset::Changeset>,
+    include_untracked_content: bool,
 }
 
 impl PreparedCandidate {
     fn verify_sources(&self) -> Result<()> {
         for (original, captured) in self.sources.iter().zip(&self.snapshots) {
-            let now = changeset::collect(&original.name)?;
+            let now = changeset::collect(&original.name, self.include_untracked_content)?;
             if serde_json::to_vec(original)? != serde_json::to_vec(&now)? {
                 bail!("Workspace {} changed during planning; retry", original.name);
             }
@@ -353,7 +354,7 @@ pub(crate) fn temporary_repository() -> Result<tempfile::TempDir> {
     Ok(temp)
 }
 
-fn prepare(names: &[String]) -> Result<PreparedCandidate> {
+fn prepare(names: &[String], include_untracked_content: bool) -> Result<PreparedCandidate> {
     if names.is_empty() {
         bail!("Select at least one workspace");
     }
@@ -368,7 +369,7 @@ fn prepare(names: &[String]) -> Result<PreparedCandidate> {
     }
     let sets: Vec<_> = names
         .iter()
-        .map(|n| changeset::collect(n))
+        .map(|n| changeset::collect(n, include_untracked_content))
         .collect::<Result<_>>()?;
     let temp = temporary_repository()?;
     let dir = temp.path();
@@ -458,14 +459,15 @@ fn prepare(names: &[String]) -> Result<PreparedCandidate> {
         candidate_commit: candidate,
         snapshots,
         sources: sets,
+        include_untracked_content,
     };
     // Recheck after candidate construction; this is not an atomic snapshot.
     prepared.verify_sources()?;
     Ok(prepared)
 }
 
-pub(crate) fn show(names: &[String], json: bool) -> Result<()> {
-    let prepared = prepare(names)?;
+pub(crate) fn show(names: &[String], json: bool, include_untracked_content: bool) -> Result<()> {
+    let prepared = prepare(names, include_untracked_content)?;
     // The owned candidate and snapshot IDs remain available to future consumers
     // until the temporary object database is dropped.
     let _candidate = (&prepared.candidate_commit, &prepared.snapshots);
@@ -554,19 +556,24 @@ fn validate_candidate(
         ],
     )?;
     checked(dir, &["update-ref", "HEAD", &prepared.candidate_commit])?;
+    let home = dir.join("validation-home");
+    fs::create_dir(&home)?;
     let mut command = Command::new(&args[0]);
     command
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", &home)
         .args(&args[1..])
         .current_dir(&checkout)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // Git invoked by validation must use only the disposable repository and index.
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("GIT_") {
-            command.env_remove(key);
+    for key in ["LANG", "LC_ALL", "LC_CTYPE"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
         }
     }
+    // Direct cooperative Git commands to the disposable repository and index.
     command
         .env("GIT_DIR", dir)
         .env("GIT_WORK_TREE", &checkout)
@@ -659,6 +666,7 @@ pub(crate) fn integrate(
     branch: &str,
     validation_args: &[std::ffi::OsString],
     json: bool,
+    include_untracked_content: bool,
 ) -> Result<()> {
     let common = git_path("--git-common-dir")?;
     let reference = format!("refs/heads/{branch}");
@@ -676,7 +684,7 @@ pub(crate) fn integrate(
             String::from_utf8_lossy(&exists.stderr)
         ),
     }
-    let prepared = prepare(names)?;
+    let prepared = prepare(names, include_untracked_content)?;
     if prepared.report.status != "clean" {
         let details = prepared
             .report
