@@ -26,10 +26,7 @@ impl Terminal {
             ws_ypixel: 0,
         };
         // libc declares a mutable winsize pointer on macOS and const on Linux.
-        #[cfg(target_os = "macos")]
         let size_ptr = &raw mut size;
-        #[cfg(target_os = "linux")]
-        let size_ptr = &raw const size;
         // openpty returns two owned file descriptors when successful.
         assert_eq!(
             unsafe {
