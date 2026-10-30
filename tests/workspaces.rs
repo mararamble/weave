@@ -2399,4 +2399,28 @@ fn validation_explicit_environment_is_scoped_and_protected() {
         assert!(!out.status.success(), "{name}");
         assert!(String::from_utf8_lossy(&out.stderr).contains("--pass-env"));
     }
+    let no_command = run(&[
+        "integrate",
+        "--branch",
+        "review/refused",
+        "--pass-env",
+        "WEAVE_PASS_ONE",
+        "one",
+    ]);
+    assert!(!no_command.status.success());
+    assert!(String::from_utf8_lossy(&no_command.stderr).contains("requires a validation command"));
+    assert!(
+        !common::isolate(&mut Command::new("git"))
+            .current_dir(&p)
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/review/refused"
+            ])
+            .fixture_output()
+            .unwrap()
+            .status
+            .success()
+    );
 }
