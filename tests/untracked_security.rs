@@ -36,7 +36,7 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
 fn default_is_path_only_and_snapshot_commands_fail_closed_until_opted_in() {
     let (temp, repo, root) = fixture();
     let work = root.join("task");
-    fs::write(work.join("new.txt"), "private-untracked-data\n").unwrap();
+    fs::write(work.join("new.rs"), "private-untracked-data\n").unwrap();
     let diff = weave(&repo, &root, &["diff", "task", "--json"]);
     assert!(diff.status.success());
     let data: Value = serde_json::from_slice(&diff.stdout).unwrap();
@@ -57,8 +57,26 @@ fn default_is_path_only_and_snapshot_commands_fail_closed_until_opted_in() {
             "warnings",
         ],
     );
+    assert_eq!(data["schema_version"], 1);
     for section in ["untracked_changes", "aggregate_changes"] {
-        assert_eq!(data[section][0]["path"], "new.txt");
+        common::assert_fields(
+            &data[section][0],
+            &[
+                "path",
+                "path_hex",
+                "previous_path",
+                "previous_path_hex",
+                "kind",
+                "added",
+                "deleted",
+                "binary",
+                "old_mode",
+                "new_mode",
+                "content_hex",
+                "incomplete",
+            ],
+        );
+        assert_eq!(data[section][0]["path"], "new.rs");
         assert!(data[section][0]["content_hex"].is_null());
         assert!(
             data[section][0]["incomplete"]
@@ -113,11 +131,11 @@ fn default_is_path_only_and_snapshot_commands_fail_closed_until_opted_in() {
             .status
             .success()
     );
-    fs::write(root.join("other/new.txt"), "another-private-value\n").unwrap();
+    fs::write(root.join("other/new.rs"), "another-private-value\n").unwrap();
     let overlap = weave(&repo, &root, &["overlaps", "task", "other", "--json"]);
     assert!(overlap.status.success());
     let overlap_json: Value = serde_json::from_slice(&overlap.stdout).unwrap();
-    assert_eq!(overlap_json["overlaps"][0]["path"], "new.txt");
+    assert_eq!(overlap_json["overlaps"][0]["path"], "new.rs");
     assert_eq!(overlap_json["overlaps"][0]["classification"], "add_add");
     let output = String::from_utf8_lossy(&overlap.stdout);
     assert!(!output.contains("private-untracked-data"));
@@ -175,7 +193,7 @@ fn default_is_path_only_and_snapshot_commands_fail_closed_until_opted_in() {
     );
     let show = common::isolate(&mut Command::new("git"))
         .current_dir(&repo)
-        .args(["show", "safe:new.txt"])
+        .args(["show", "safe:new.rs"])
         .fixture_output()
         .unwrap();
     assert_eq!(show.stdout, b"private-untracked-data\n");
