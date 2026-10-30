@@ -714,7 +714,8 @@ fn vineweaver_pty_review_restores_terminal_on_quit_and_cancellation() {
                     &mut slave_fd,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut size,
+                    // libc exposes this as *mut on macOS and *const on Linux.
+                    &raw mut size,
                 )
             },
             0
