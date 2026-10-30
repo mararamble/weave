@@ -732,7 +732,7 @@ Particularly valuable areas include:
 
 ## License
 
-A license has not yet been selected.
+MIT
 
 ---
 
