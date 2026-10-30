@@ -23,3 +23,7 @@
 - Use disposable repositories with explicit branch names. Test behavior changes and refusal paths.
 - JSON outputs are versioned (currently schema version 1); document and version incompatible field changes.
 - Keep detailed behavior in `docs/` where appropriate.
+
+## Terminology
+- Weave is the tool; Untangle is the action and `weave untangle` command; Vineweaver is the engine and interactive review UI.
+- Preserve `weave untangle` and its flags, JSON schema v1 fields and values including manifest `engine: "vineweaver"`, bundle refs `refs/heads/vineweaver-0001` and following, `.vineweaver-export-*` staging names, artifact filenames, and the `Weave Preview` synthetic identity.
