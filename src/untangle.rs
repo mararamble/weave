@@ -631,7 +631,7 @@ pub(crate) fn show(options: Options) -> Result<()> {
         if options.json {
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
-            println!("Untangle export: {}", destination.display());
+            humanln!("Untangle export: {}", destination.display());
         }
         return Ok(());
     }
@@ -639,18 +639,23 @@ pub(crate) fn show(options: Options) -> Result<()> {
     if options.json {
         println!("{}", serde_json::to_string_pretty(&preview)?);
     } else {
-        println!(
+        humanln!(
             "Snapshot {}\nBase {}\nCaptured tree {}",
-            engine.snapshot.id, engine.snapshot.base_commit, engine.snapshot.captured_tree
+            engine.snapshot.id,
+            engine.snapshot.base_commit,
+            engine.snapshot.captured_tree
         );
         for u in &engine.snapshot.units {
             if let Some(h) = &u.hunk {
-                println!(
+                humanln!(
                     "Hunk: -{},{} +{},{}",
-                    h.old_start, h.old_lines, h.new_start, h.new_lines
+                    h.old_start,
+                    h.old_lines,
+                    h.new_start,
+                    h.new_lines
                 );
             }
-            println!(
+            humanln!(
                 "{} {:?} {} -> {} (ownership unknown)",
                 u.id,
                 u.kind_name(),
@@ -659,21 +664,23 @@ pub(crate) fn show(options: Options) -> Result<()> {
             );
         }
         for a in &preview.applications {
-            println!(
+            humanln!(
                 "Group {:?}: independently applicable={}, sequence={:?}",
-                a.group, a.independently_applicable, a.sequence_applicable
+                a.group,
+                a.independently_applicable,
+                a.sequence_applicable
             );
             for w in &a.warnings {
-                println!("Warning [{}]: {}", w.code, w.message.escape_default());
+                humanln!("Warning [{}]: {}", w.code, w.message.escape_default());
             }
         }
-        println!(
+        humanln!(
             "Unassigned: {}; sequence applicable: {}",
             preview.unassigned.len(),
             preview.sequence_applicable
         );
         for w in preview.warnings {
-            println!("Warning [{}]: {}", w.code, w.message);
+            humanln!("Warning [{}]: {}", w.code, w.message);
         }
     }
     Ok(())

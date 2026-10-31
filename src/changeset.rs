@@ -753,31 +753,43 @@ pub(crate) fn show(
         ]
     };
     let diff = run(Path::new(&record.path), &args)?;
-    print!("{}", String::from_utf8_lossy(&diff));
+    use std::io::IsTerminal;
+    let to_terminal = std::io::stdout().is_terminal();
+    let text = String::from_utf8_lossy(&diff);
+    if to_terminal {
+        print!("{}", crate::terminal_text(&text));
+    } else {
+        print!("{text}");
+    }
+    macro_rules! diffline {
+        ($($arg:tt)*) => {
+            if to_terminal { humanln!($($arg)*); } else { println!($($arg)*); }
+        };
+    }
     for f in &s.untracked_changes {
         if let Some(content) = &f.content_hex {
             if stat {
-                println!(
+                diffline!(
                     "Untracked: {} ({} bytes)",
                     f.path.escape_default(),
                     content.len() / 2
                 );
                 continue;
             }
-            println!(
+            diffline!(
                 "Untracked: {} ({} bytes, content hex: {})",
                 f.path.escape_default(),
                 content.len() / 2,
                 content
             );
         } else {
-            println!(
+            diffline!(
                 "Untracked: {} (omitted: {})",
                 f.path.escape_default(),
                 f.incomplete.as_deref().unwrap_or("unknown")
             );
         }
     }
-    eprintln!("Warning: collection is not an atomic snapshot; concurrent changes may be missed.");
+    humanerrln!("Warning: collection is not an atomic snapshot; concurrent changes may be missed.");
     Ok(())
 }
