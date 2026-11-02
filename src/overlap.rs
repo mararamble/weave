@@ -199,10 +199,10 @@ pub(crate) fn show(requested: &[String], json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         if report.overlaps.is_empty() {
-            println!("No shared changed files.");
+            humanln!("No shared changed files.");
         }
         for o in &report.overlaps {
-            println!(
+            humanln!(
                 "{}: {} and {} — {}{}",
                 o.path.escape_default(),
                 o.workspaces[0],
@@ -214,7 +214,7 @@ pub(crate) fn show(requested: &[String], json: bool) -> Result<()> {
                     .unwrap_or_default()
             );
         }
-        eprintln!(
+        humanerrln!(
             "Overlap does not establish whether Git can merge changes or whether they are semantically compatible."
         );
     }

@@ -570,7 +570,10 @@ fn draw(f: &mut Frame, app: &App) {
                 .unwrap_or("Capture pending/incomplete")
         )
     };
-    f.render_widget(Paragraph::new(title).wrap(Wrap { trim: false }), rows[0]);
+    f.render_widget(
+        Paragraph::new(crate::terminal_text(&title)).wrap(Wrap { trim: false }),
+        rows[0],
+    );
     let cols = if rows[1].width < 90 {
         Layout::vertical([
             Constraint::Percentage(25),
@@ -597,8 +600,12 @@ fn draw(f: &mut Frame, app: &App) {
                         .as_ref()
                         .and_then(|p| p.assignments[i].as_deref())
                         .unwrap_or("UNASSIGNED");
-                    ListItem::new(format!("{} -> {}", c.units[i].label, safe(assignment)))
-                        .style(selected(app.focus == Focus::Units && i == app.unit))
+                    ListItem::new(crate::terminal_text(&format!(
+                        "{} -> {}",
+                        c.units[i].label,
+                        safe(assignment)
+                    )))
+                    .style(selected(app.focus == Focus::Units && i == app.unit))
                 })
                 .collect()
         })
@@ -644,7 +651,7 @@ fn draw(f: &mut Frame, app: &App) {
         format!("{}\n\n{}", app.validation, app.detail)
     };
     f.render_widget(
-        Paragraph::new(text)
+        Paragraph::new(crate::terminal_text(&text))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -674,7 +681,10 @@ fn draw(f: &mut Frame, app: &App) {
             safe(&app.message)
         )
     };
-    f.render_widget(Paragraph::new(footer).wrap(Wrap { trim: false }), rows[2]);
+    f.render_widget(
+        Paragraph::new(crate::terminal_text(&footer)).wrap(Wrap { trim: false }),
+        rows[2],
+    );
 }
 fn selected(active: bool) -> Style {
     if active {
@@ -901,5 +911,27 @@ mod tests {
         app.key(KeyCode::Esc);
         assert!(app.cancel.load(Ordering::Acquire));
         app.key(KeyCode::Char('q'));
+    }
+    #[test]
+    fn every_review_panel_escapes_terminal_controls() {
+        let mut app = app();
+        let bad = "ESC\x1b]777;WEV40\x07";
+        app.name = bad.into();
+        app.validation = bad.into();
+        app.detail = bad.into();
+        app.message = bad.into();
+        app.capture.as_mut().unwrap().units[0].label = bad.into();
+        app.plan.as_mut().unwrap().groups[0] = bad.into();
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(160, 40)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(!text.contains('\x1b'), "{text:?}");
+        assert!(text.contains("\\u{1b}"), "{text:?}");
     }
 }

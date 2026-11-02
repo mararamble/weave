@@ -428,3 +428,40 @@ fn control_c_exits_from_text_modal_and_restores_terminal() {
     terminal.finish();
     assert!(!spaces.exists());
 }
+
+#[test]
+fn both_interactive_interfaces_render_escape_fixture_safely() {
+    const INJECTED: &[u8] = b"\x1b]777;WEV40\x07";
+    for vineweaver in [false, true] {
+        let (_temp, repo, spaces) = fixture();
+        assert!(
+            weave(&repo, &spaces, &["new", "task", "--from", "HEAD"])
+                .status
+                .success()
+        );
+        let mut content = b"changed ".to_vec();
+        content.extend_from_slice(INJECTED);
+        content.extend_from_slice(b"\n");
+        fs::write(spaces.join("task/file"), &content).unwrap();
+        let mut terminal = Terminal::new(&repo, &spaces);
+        terminal.wait_for("1 workspaces; Enter opens files");
+        if vineweaver {
+            terminal.send(b"u");
+        } else {
+            terminal.send(b"\r");
+            terminal.wait_for("Enter opens diff");
+            terminal.send(b"\r");
+        }
+        terminal.wait_for("WEV40");
+        if vineweaver {
+            terminal.send(b"q");
+            terminal.wait_for("Workspaces");
+            terminal.send(b"q");
+        } else {
+            terminal.send(b"qq");
+        }
+        terminal.finish();
+        assert!(!terminal.seen.windows(INJECTED.len()).any(|w| w == INJECTED));
+        assert_eq!(fs::read(spaces.join("task/file")).unwrap(), content);
+    }
+}

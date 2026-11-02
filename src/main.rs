@@ -1,6 +1,31 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+// Only human-readable output crosses this boundary. JSON and redirected patch
+// output deliberately bypass it so their data contracts stay unchanged.
+fn terminal_text(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    for c in input.chars() {
+        if c.is_control() && c != '\n' {
+            output.extend(c.escape_default());
+        } else {
+            output.push(c);
+        }
+    }
+    output
+}
+
+macro_rules! humanln {
+    ($($arg:tt)*) => {
+        std::println!("{}", crate::terminal_text(&format!($($arg)*)))
+    };
+}
+macro_rules! humanerrln {
+    ($($arg:tt)*) => {
+        std::eprintln!("{}", crate::terminal_text(&format!($($arg)*)))
+    };
+}
+
 mod changeset;
 mod git_process;
 mod integration;
@@ -300,8 +325,30 @@ fn status() -> Result<Status> {
         paths_lossy: lossy,
     })
 }
-fn main() -> Result<()> {
-    match Cli::parse().command {
+fn main() -> std::process::ExitCode {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let message = terminal_text(&error.to_string());
+            if error.use_stderr() {
+                std::eprint!("{message}");
+            } else {
+                std::print!("{message}");
+            }
+            return std::process::ExitCode::from(error.exit_code() as u8);
+        }
+    };
+    match run(cli.command) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            humanerrln!("Error: {error:?}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(command: Option<Commands>) -> Result<()> {
+    match command {
         None => tui::run(false)?,
         Some(Commands::Untangle(options)) => untangle::show(options)?,
         Some(Commands::Tui {
@@ -343,11 +390,14 @@ fn main() -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&s)?);
             } else {
-                println!(
+                humanln!(
                     "Git repository: yes\nRepository root: {}\nWorktree: {}\nGit directory: {}\nCommon directory: {}",
-                    s.repository_root, s.worktree_path, s.git_dir, s.common_dir
+                    s.repository_root,
+                    s.worktree_path,
+                    s.git_dir,
+                    s.common_dir
                 );
-                println!(
+                humanln!(
                     "HEAD: {}{}",
                     s.branch
                         .as_deref()
@@ -361,7 +411,7 @@ fn main() -> Result<()> {
                         ""
                     }
                 );
-                println!(
+                humanln!(
                     "{}: {} staged, {} unstaged, {} untracked",
                     if s.dirty { "Dirty" } else { "Clean" },
                     s.staged,
@@ -369,7 +419,7 @@ fn main() -> Result<()> {
                     s.untracked
                 );
                 if s.paths_lossy {
-                    println!("Note: paths contain non-UTF-8 bytes and are displayed lossily.");
+                    humanln!("Note: paths contain non-UTF-8 bytes and are displayed lossily.");
                 }
             }
         }
@@ -397,5 +447,13 @@ mod tests {
             assert!(counts(malformed).is_err(), "accepted {malformed:?}");
         }
         assert_eq!(counts(b" M \xff\nname\0").unwrap(), (0, 1, 0));
+    }
+    #[test]
+    fn human_output_escapes_controls_preserves_unicode_and_line_breaks() {
+        assert_eq!(
+            crate::terminal_text("é\x1b\t\r\u{85}\u{7f}\nnext"),
+            "é\\u{1b}\\t\\r\\u{85}\\u{7f}\nnext"
+        );
+        assert_eq!(crate::terminal_text("already \\u{1b}"), "already \\u{1b}");
     }
 }

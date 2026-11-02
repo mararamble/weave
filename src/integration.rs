@@ -475,21 +475,25 @@ pub(crate) fn show(names: &[String], json: bool, include_untracked_content: bool
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!(
+        humanln!(
             "Target base: {}\nPlan: {}",
-            report.target_base, report.status
+            report.target_base,
+            report.status
         );
         for step in &report.steps {
-            println!(
+            humanln!(
                 "{}: {} (base {}, head {})",
-                step.workspace, step.status, step.base_commit, step.head_commit
+                step.workspace,
+                step.status,
+                step.base_commit,
+                step.head_commit
             );
             if let Some(detail) = &step.conflict_details {
-                println!("{detail}");
+                humanln!("{detail}");
             }
         }
         for warning in &report.warnings {
-            eprintln!("Warning: {warning}");
+            humanerrln!("Warning: {warning}");
         }
     }
     Ok(())
@@ -743,7 +747,7 @@ pub(crate) fn integrate(
             &format!("{}^{{tree}}", prepared.candidate_commit),
         ],
     )?;
-    eprintln!(
+    humanerrln!(
         "Integration preview: {branch} from {} with {} workspace(s); candidate tree {tree}",
         prepared.report.target_base,
         names.len()
@@ -857,12 +861,15 @@ pub(crate) fn integrate(
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
-        println!(
+        humanln!(
             "Created integration branch {} at {}\nTree: {}\nTarget base: {}",
-            result.branch, result.commit, result.tree, result.target_base
+            result.branch,
+            result.commit,
+            result.tree,
+            result.target_base
         );
         for source in &result.sources {
-            println!(
+            humanln!(
                 "{}: head {}, snapshot {}, included commits: {}",
                 source.workspace,
                 source.head,
@@ -871,7 +878,7 @@ pub(crate) fn integrate(
             );
         }
         if let Some(validation) = &result.validation {
-            println!(
+            humanln!(
                 "Validation {:?}: exit {:?}{}",
                 validation.command,
                 validation.exit_code,
@@ -882,18 +889,18 @@ pub(crate) fn integrate(
                 }
             );
             if !validation.stdout.is_empty() {
-                println!("Validation stdout:\n{}", validation.stdout);
+                humanln!("Validation stdout:\n{}", validation.stdout);
             }
             if !validation.stderr.is_empty() {
-                eprintln!("Validation stderr:\n{}", validation.stderr);
+                humanerrln!("Validation stderr:\n{}", validation.stderr);
             }
             if validation.output_truncated {
-                eprintln!("Validation output was truncated to 64 KiB per stream.");
+                humanerrln!("Validation output was truncated to 64 KiB per stream.");
             }
         }
     }
     if let Err(error) = fs::remove_file(&journal_path) {
-        eprintln!(
+        humanerrln!(
             "Integration succeeded; could not remove recovery journal {}: {error}",
             journal_path.display()
         );

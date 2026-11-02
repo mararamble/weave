@@ -167,7 +167,7 @@ pub fn create(name: &str, from: &str) -> Result<()> {
         fs::rename(&tmp, &record_path)?;
         Ok(())
     })().context("Worktree was created but metadata finalization failed; inspect the pending record and worktree")?;
-    println!("{}", path.display());
+    humanln!("{}", path.display());
     Ok(())
 }
 #[derive(Debug)]
@@ -319,10 +319,10 @@ pub fn list(json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&listing)?);
     } else if listing.workspaces.is_empty() {
-        println!("No managed workspaces.");
+        humanln!("No managed workspaces.");
     } else {
         for e in listing.workspaces {
-            println!(
+            humanln!(
                 "{}  {}  {}\n  base: {}  {}  {}",
                 e.record.name,
                 e.record.branch,

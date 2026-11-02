@@ -299,20 +299,20 @@ pub(crate) fn remove(name: &str, dry_run: bool, yes: bool) -> Result<()> {
         Ok(checked) => checked,
         Err(error) if dry_run => {
             if let Err(diagnostic) = crate::reconcile::preview(name) {
-                eprintln!("Could not produce detailed preview: {diagnostic:#}");
+                humanerrln!("Could not produce detailed preview: {diagnostic:#}");
             }
             bail!("Removal blocked: {error:#}. No deletion was attempted");
         }
         Err(error) => return Err(error),
     };
-    println!(
+    humanln!(
         "Target: {}\nBranch retained: {}\nMetadata: {}\nGit registration: verified\nState: clean and eligible\nOperations: Git worktree remove, then delete this metadata record\nRemaining: branch and commits",
         before.path.display(),
         before.branch,
         before.record_path.display()
     );
     if dry_run {
-        println!("Preview only; no files removed.");
+        humanln!("Preview only; no files removed.");
         return Ok(());
     }
     if !yes {
@@ -352,7 +352,7 @@ pub(crate) fn remove(name: &str, dry_run: bool, yes: bool) -> Result<()> {
         );
     }
     fs::remove_file(&after.record_path).with_context(|| format!("Git removed {}; metadata remains at {}. Inspect it and remove only that record after confirming the workspace is absent", after.path.display(), after.record_path.display()))?;
-    println!(
+    humanln!(
         "Removed {}. Branch {} remains.",
         after.path.display(),
         after.branch

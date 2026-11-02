@@ -205,6 +205,8 @@ weave diff auth --json
 
 Diffs are calculated relative to the workspace's recorded creation commit, not necessarily the current default branch.
 
+Human-readable output escapes terminal controls in repository data, diagnostics and displayed diffs. Line feeds are retained for multiline output, including those originating in untrusted text. Redirected `weave diff` output retains its existing output for pipelines and can contain control characters. JSON values and byte-exact `path_hex` fields are unchanged. See [terminal output boundaries](docs/terminal-output-safety.md).
+
 ### Detect overlapping changes
 
 Compare all ready managed workspaces:

@@ -290,7 +290,7 @@ pub(crate) fn preview(name: &str) -> Result<()> {
             "Multiple metadata records claim workspace {name}; inspect them before proceeding"
         );
     }
-    println!(
+    humanln!(
         "Target: {}\nBranch retained: {}\nMetadata: {}\nGit registration: {}\nState: {}",
         item.path,
         item.branch,
@@ -299,9 +299,9 @@ pub(crate) fn preview(name: &str) -> Result<()> {
         item.states.join(", ")
     );
     for candidate in &item.moved_candidates {
-        println!("Possible moved worktree: {candidate}");
+        humanln!("Possible moved worktree: {candidate}");
     }
-    println!("No operations will be performed while this target is blocked.");
+    humanln!("No operations will be performed while this target is blocked.");
     Ok(())
 }
 
@@ -311,7 +311,7 @@ pub(crate) fn show(json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&inventory)?);
     } else {
         for item in &inventory.managed {
-            println!(
+            humanln!(
                 "{}  {}  {}\n  record: {}\n  state: {}",
                 item.name,
                 item.branch,
@@ -320,14 +320,14 @@ pub(crate) fn show(json: bool) -> Result<()> {
                 item.states.join(", ")
             );
             for candidate in &item.moved_candidates {
-                println!("  possible moved worktree: {candidate}");
+                humanln!("  possible moved worktree: {candidate}");
             }
         }
         for item in &inventory.unknown {
-            println!("Unverified Git worktree: {}", item.path);
+            humanln!("Unverified Git worktree: {}", item.path);
         }
         if inventory.managed.is_empty() {
-            println!("No managed workspaces.");
+            humanln!("No managed workspaces.");
         }
     }
     Ok(())
