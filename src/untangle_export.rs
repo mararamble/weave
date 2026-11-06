@@ -30,6 +30,8 @@ pub(crate) struct Plan {
     pub snapshot_id: String,
     pub groups: Vec<String>,
     pub assignments: Vec<Option<String>>,
+    #[serde(skip)]
+    pub evidence: Option<crate::untangle_evidence::ReviewEvidence>,
 }
 #[derive(Serialize)]
 struct Entry {
@@ -72,6 +74,7 @@ impl Engine {
                 .iter()
                 .map(|u| u.group.clone())
                 .collect(),
+            evidence: self.evidence.clone(),
         }
     }
     pub(crate) fn set_plan(&mut self, plan: &Plan) -> Result<()> {
@@ -82,6 +85,11 @@ impl Engine {
             bail!("Stale or invalid Vineweaver review plan");
         }
         // Validate everything before changing the session.
+        if let Some(evidence) = &plan.evidence
+            && evidence.snapshot_id != self.snapshot.id
+        {
+            bail!("Stale evidence plan");
+        }
         let mut names = std::collections::HashSet::new();
         for name in &plan.groups {
             if name.trim().is_empty() || name.chars().any(char::is_control) || !names.insert(name) {
@@ -97,6 +105,7 @@ impl Engine {
             bail!("Assignment references unknown group");
         }
         self.groups.clear();
+        self.evidence = plan.evidence.clone();
         for name in &plan.groups {
             self.add_group(name)?;
         }
@@ -245,6 +254,9 @@ pub(crate) fn export(
         bail!("Export destination already exists; nothing overwritten");
     }
     let validated = validate(engine, cancel)?;
+    if let Some(evidence) = &engine.evidence {
+        evidence.check_export(engine)?;
+    }
     if !validated.sequence_applicable {
         bail!("Cannot export a non-applicable sequence; review validation warnings");
     }
@@ -345,7 +357,20 @@ pub(crate) fn export(
             staging.path().join("review-plan.json"),
             serde_json::to_vec_pretty(&engine.edit_plan())?,
         )?;
+        if let Some(evidence) = &engine.evidence {
+            fs::write(
+                staging.path().join("provenance.json"),
+                serde_json::to_vec_pretty(evidence)?,
+            )?;
+            fs::write(
+                staging.path().join("audit.json"),
+                serde_json::to_vec_pretty(
+                    &serde_json::json!({"schema_version":1,"snapshot_id":engine.snapshot.id,"entries":evidence.audit}),
+                )?,
+            )?;
+        }
         engine.verify_source()?;
+        engine.verify_evidence()?;
         check(cancel)?;
         publish(staging.path(), &target)?;
         // TempDir now points at the old staging name; it cannot remove the published result.

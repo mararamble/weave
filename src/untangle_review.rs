@@ -25,8 +25,12 @@ use std::{
     },
     time::Duration,
 };
+fn bail_result(message: &str) -> Result<()> {
+    Err(anyhow::anyhow!("{message}"))
+}
 
 struct UnitView {
+    id: String,
     label: String,
     preview: String,
 }
@@ -37,12 +41,12 @@ struct Capture {
     plan: Plan,
 }
 enum Job {
-    Capture(String, bool, Arc<AtomicBool>),
+    Capture(String, bool, bool, Arc<AtomicBool>),
     Validate(u64, Plan, Arc<AtomicBool>),
     Export(u64, Plan, PathBuf, Kind, bool, Arc<AtomicBool>),
 }
 enum Message {
-    Captured(Result<Capture>),
+    Captured(Result<Box<Capture>>),
     Validated(u64, Result<export::Validation>),
     Exported(u64, Result<String>),
 }
@@ -74,6 +78,7 @@ fn captured(engine: &Engine) -> Capture {
                 })
                 .unwrap_or_else(|| " [whole file]".into());
             UnitView {
+                id: u.id.clone(),
                 label: format!("{}{}", safe(&u.path), range),
                 preview,
             }
@@ -90,14 +95,17 @@ fn worker(rx: Receiver<Job>, tx: Sender<Message>) {
     let mut engine: Option<Engine> = None;
     while let Ok(job) = rx.recv() {
         match job {
-            Job::Capture(name, include_untracked_content, flag) => {
+            Job::Capture(name, include_untracked_content, provenance, flag) => {
                 let result = crate::git_process::cancellable(flag, || {
-                    let next = Engine::capture(&name, include_untracked_content)?;
+                    let mut next = Engine::capture(&name, include_untracked_content)?;
+                    if provenance {
+                        next.enable_evidence()?;
+                    }
                     let data = captured(&next);
                     engine = Some(next);
                     Ok(data)
                 });
-                if tx.send(Message::Captured(result)).is_err() {
+                if tx.send(Message::Captured(result.map(Box::new))).is_err() {
                     break;
                 }
             }
@@ -138,6 +146,7 @@ fn copy_plan(plan: &Plan) -> Plan {
         snapshot_id: plan.snapshot_id.clone(),
         groups: plan.groups.clone(),
         assignments: plan.assignments.clone(),
+        evidence: plan.evidence.clone(),
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -147,6 +156,9 @@ enum Focus {
     Patch,
 }
 enum Prompt {
+    OverrideAgent,
+    EvidenceReason(Option<String>),
+    AcknowledgeEvidence,
     Group,
     Rename,
     PatchExport,
@@ -176,6 +188,7 @@ struct App {
     rx: Receiver<Message>,
     name: String,
     include_untracked_content: bool,
+    provenance: bool,
 }
 impl App {
     fn new(name: String, tx: Sender<Job>, rx: Receiver<Message>) -> Self {
@@ -201,6 +214,7 @@ impl App {
             rx,
             name,
             include_untracked_content: false,
+            provenance: false,
         }
     }
     fn token(&mut self) -> Arc<AtomicBool> {
@@ -221,12 +235,21 @@ impl App {
         let _ = self.tx.send(Job::Capture(
             self.name.clone(),
             self.include_untracked_content,
+            self.provenance,
             flag,
         ));
     }
     fn checkpoint(&mut self) {
         if let Some(plan) = &self.plan {
-            self.history.push_back(copy_plan(plan));
+            // Evidence and its append-only audit are independent of undoable
+            // grouping state; never duplicate whole replay histories per edit.
+            self.history.push_back(Plan {
+                schema_version: plan.schema_version,
+                snapshot_id: plan.snapshot_id.clone(),
+                groups: plan.groups.clone(),
+                assignments: plan.assignments.clone(),
+                evidence: None,
+            });
             while self.history.len() > 32
                 || self
                     .history
@@ -239,6 +262,11 @@ impl App {
                             .sum::<usize>()
                             + p.assignments.len() * 32
                             + p.groups.iter().map(String::len).sum::<usize>()
+                            + p.evidence
+                                .as_ref()
+                                .and_then(|e| serde_json::to_vec(e).ok())
+                                .map(|b| b.len())
+                                .unwrap_or(0)
                     })
                     .sum::<usize>()
                     > 8 * 1024 * 1024
@@ -260,6 +288,12 @@ impl App {
         }
         self.checkpoint();
         action(self.plan.as_mut().unwrap(), self.unit, self.group);
+        if let Some(e) = self.plan.as_mut().and_then(|p| p.evidence.as_mut()) {
+            e.record(
+                "grouping_edit",
+                "Assignment, group or export order changed; original patches preserved",
+            );
+        }
         self.group = self
             .group
             .min(self.plan.as_ref().unwrap().groups.len().saturating_sub(1));
@@ -278,6 +312,9 @@ impl App {
                 );
                 for (i, assignment) in plan.assignments.iter().enumerate() {
                     if assignment.as_ref() == Some(group) && text.len() < 128 * 1024 {
+                        if let Some(e) = &plan.evidence {
+                            text.push_str(&e.unit_preview(&c.units[i].id));
+                        }
                         text.push_str(&c.units[i].preview);
                         text.push('\n');
                     }
@@ -293,9 +330,15 @@ impl App {
         } else {
             c.units
                 .get(self.unit)
-                .map(|u| u.preview.clone())
+                .map(|u| match &plan.evidence {Some(e)=>format!("{}\nORIGINAL CAPTURED PATCH\n{}\nCURRENT PATCH: same immutable bytes; assignment/order edits only.\n",e.unit_preview(&u.id),u.preview),None=>u.preview.clone()})
                 .unwrap_or_else(|| "No captured changes".into())
         };
+        if self.detail.len() > 128 * 1024 {
+            self.detail
+                .truncate(self.detail.floor_char_boundary(128 * 1024));
+            self.detail
+                .push_str("\n[Evidence/patch display truncated; export retains complete evidence]");
+        }
     }
     fn receive(&mut self) {
         while let Ok(message) = self.rx.try_recv() {
@@ -304,7 +347,7 @@ impl App {
                 Message::Captured(result) => match result {
                     Ok(c) => {
                         self.plan = Some(copy_plan(&c.plan));
-                        self.capture = Some(c);
+                        self.capture = Some(*c);
                         self.history.clear();
                         self.revision += 1;
                         self.validated = None;
@@ -406,6 +449,36 @@ impl App {
                 };
                 let input = std::mem::take(&mut self.input);
                 match prompt {
+                    Prompt::OverrideAgent => {
+                        if input.trim().is_empty()
+                            || input.len() > 256
+                            || input.chars().any(char::is_control)
+                        {
+                            self.message = "Manual agent ID must be nonempty and bounded".into();
+                            return;
+                        }
+                        self.prompt = Some(Prompt::EvidenceReason(Some(input)));
+                    }
+                    Prompt::EvidenceReason(agent) => {
+                        let unit = self
+                            .capture
+                            .as_ref()
+                            .and_then(|c| c.units.get(self.unit))
+                            .map(|u| u.id.clone());
+                        let result =
+                            match (unit, self.plan.as_mut().and_then(|p| p.evidence.as_mut())) {
+                                (Some(unit), Some(e)) => e.resolve(&unit, agent.as_deref(), &input),
+                                _ => bail_result("Enable --provenance first"),
+                            };
+                        self.evidence_edit_result(result);
+                    }
+                    Prompt::AcknowledgeEvidence => {
+                        let result = match self.plan.as_mut().and_then(|p| p.evidence.as_mut()) {
+                            Some(e) => e.acknowledge(&input),
+                            None => bail_result("Enable --provenance first"),
+                        };
+                        self.evidence_edit_result(result);
+                    }
                     Prompt::Group | Prompt::Rename => {
                         if input.trim().is_empty()
                             || input.chars().any(char::is_control)
@@ -502,6 +575,19 @@ impl App {
             _ => {}
         }
     }
+    fn evidence_edit_result(&mut self, result: Result<()>) {
+        match result {
+            Ok(()) => {
+                self.revision += 1;
+                self.validated = None;
+                self.validation = "Evidence review changed; v validates before export".into();
+                self.message =
+                    "Evidence decision appended to audit; original evidence retained".into();
+                self.update_detail();
+            }
+            Err(e) => self.message = format!("Evidence review refused: {e:#}"),
+        }
+    }
     fn start_export(&mut self, path: PathBuf, kind: Kind, partial: bool) {
         if let Some(plan) = self.plan.as_ref().map(copy_plan) {
             let flag = self.token();
@@ -518,6 +604,9 @@ impl App {
             return false;
         }
         match key {
+            KeyCode::Char('o'|'z'|'a') if !self.busy && self.plan.as_ref().is_some_and(|p|p.evidence.is_some())=>{
+                self.prompt=Some(match key {KeyCode::Char('o')=>Prompt::OverrideAgent,KeyCode::Char('z')=>Prompt::EvidenceReason(None),_=>Prompt::AcknowledgeEvidence});self.input.clear();
+            }
             KeyCode::Char('q')=>{self.cancel.store(true,Ordering::Release);return true;}
             KeyCode::Esc=>{self.cancel.store(true,Ordering::Release);self.message="Cancellation requested; current Git operation may finish before cleanup".into();}
             KeyCode::Char('?')=>self.help= !self.help,
@@ -531,7 +620,7 @@ impl App {
             KeyCode::Char(' ')=>self.edit(|p,u,g|{if let (Some(a),Some(group))=(p.assignments.get_mut(u),p.groups.get(g)){*a=Some(group.clone());}}),
             KeyCode::Char('x')=>self.edit(|p,u,_|{if let Some(a)=p.assignments.get_mut(u){*a=None;}}),
             KeyCode::Char('['|']')=>{let up=key==KeyCode::Char('[');let g=self.group;self.edit(|p,_,_|{if up&&g>0&&g<p.groups.len(){p.groups.swap(g,g-1);}else if !up&&g+1<p.groups.len(){p.groups.swap(g,g+1);}});if !self.busy {let len=self.plan.as_ref().map(|p|p.groups.len()).unwrap_or(0);self.group=if up{g.saturating_sub(1)}else{(g+1).min(len.saturating_sub(1))};self.update_detail();}}
-            KeyCode::Char('u') if !self.busy=>{if let Some(plan)=self.history.pop_back(){self.plan=Some(plan);self.revision+=1;self.validated=None;self.validation="Undo changed assignments/order; validate again".into();self.group=self.group.min(self.plan.as_ref().unwrap().groups.len().saturating_sub(1));self.update_detail();}}
+            KeyCode::Char('u') if !self.busy=>{if let Some(mut plan)=self.history.pop_back(){plan.evidence=self.plan.as_ref().and_then(|p|p.evidence.clone());if let Some(e)=&mut plan.evidence{e.record("undo_grouping","Grouping/order edit undone; evidence audit history retained");}self.plan=Some(plan);self.revision+=1;self.validated=None;self.validation="Undo changed assignments/order; validate again".into();self.group=self.group.min(self.plan.as_ref().unwrap().groups.len().saturating_sub(1));self.update_detail();}}
             KeyCode::Char('s')=>self.message="Safe split: capture already separates existing Git hunks. Contiguous/overlapping edits and whole-file units remain indivisible.".into(),
             KeyCode::Tab=>{self.focus=match self.focus{Focus::Units=>Focus::Groups,Focus::Groups=>Focus::Patch,Focus::Patch=>Focus::Units};if self.focus!=Focus::Patch{self.update_detail();}}
             KeyCode::Down|KeyCode::Char('j')=>{match self.focus{Focus::Units=>self.unit=(self.unit+1).min(self.capture.as_ref().map(|c|c.units.len()).unwrap_or(0).saturating_sub(1)),Focus::Groups=>self.group=(self.group+1).min(self.plan.as_ref().map(|p|p.groups.len()).unwrap_or(0).saturating_sub(1)),Focus::Patch=>self.scroll=self.scroll.saturating_add(1)}if self.focus!=Focus::Patch{self.update_detail();}}
@@ -625,10 +714,29 @@ fn draw(f: &mut Frame, app: &App) {
             window(app.group, cols[1].height, p.groups.len())
                 .map(|i| {
                     ListItem::new(format!(
-                        "{} {} {}",
+                        "{} {} {}{}",
                         if i == app.group { ">" } else { " " },
                         i + 1,
-                        safe(&p.groups[i])
+                        safe(&p.groups[i]),
+                        p.evidence
+                            .as_ref()
+                            .map(|e| {
+                                let sources = p
+                                    .assignments
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, g)| g.as_ref() == Some(&p.groups[i]))
+                                    .filter_map(|(n, _)| {
+                                        app.capture
+                                            .as_ref()
+                                            .and_then(|c| c.units.get(n))
+                                            .and_then(|u| e.units.get(&u.id))
+                                    })
+                                    .map(|u| format!("{:?}", u.attribution.source))
+                                    .collect::<std::collections::BTreeSet<_>>();
+                                format!(" [{}]", sources.into_iter().collect::<Vec<_>>().join("/"))
+                            })
+                            .unwrap_or_default()
                     ))
                     .style(selected(app.focus == Focus::Groups && i == app.group))
                 })
@@ -646,9 +754,18 @@ fn draw(f: &mut Frame, app: &App) {
     let text = if matches!(app.prompt, Some(Prompt::Confirm(..) | Prompt::Partial(..))) {
         app.detail.clone()
     } else if app.help {
-        "Tab panes · j/k or arrows move · PgUp/PgDn scroll\ng new group · n rename · d delete group (unassigns)\nSpace assign/move unit to selected group · x unassign\n[ / ] reorder active group · u undo (32 edits / 8 MiB)\ns safe split explanation (existing Git hunks already separated)\nv validate · p patch export · c independent-commit bundle\nExports require a NEW destination and typing export.\nPartial selection also requires typing partial.\nEsc cancel task/prompt · r recapture (discards edits) · q/Ctrl-C quit\nNo authorship inference. Applicability is not semantic compatibility.\nPatch display is bounded; exported bytes are exact.".into()
+        "Tab panes · j/k or arrows move · PgUp/PgDn scroll\ng new group · n rename · d delete group (unassigns)\nSpace assign/move unit to selected group · x unassign\n[ / ] reorder active group · u undo (32 edits / 8 MiB)\ns safe split explanation (existing Git hunks already separated)\nv validate · p patch export · c independent-commit bundle\nExports require a NEW destination and typing export.\nPartial selection also requires typing partial.\nEsc cancel task/prompt · r recapture (discards edits) · q/Ctrl-C quit\nProvenance mode: o manual override · z leave unknown · a acknowledge\nEvidence decisions require a reason; revalidate with v after review.\nNo authorship inference. Applicability is not semantic compatibility.\nPatch display is bounded; exported bytes are exact.".into()
     } else {
-        format!("{}\n\n{}", app.validation, app.detail)
+        format!(
+            "{}\n{}\n\n{}",
+            app.validation,
+            app.plan
+                .as_ref()
+                .and_then(|p| p.evidence.as_ref())
+                .map(|e| e.summary())
+                .unwrap_or_default(),
+            app.detail
+        )
     };
     f.render_widget(
         Paragraph::new(crate::terminal_text(&text))
@@ -662,6 +779,11 @@ fn draw(f: &mut Frame, app: &App) {
         cols[2],
     );
     let prompt = app.prompt.as_ref().map(|p| match p {
+        Prompt::OverrideAgent => "Manual agent ID (assertion only)",
+        Prompt::EvidenceReason(_) => "Reason for manual override / leaving unknown",
+        Prompt::AcknowledgeEvidence => {
+            "Reason acknowledging evidence uncertainty and semantic dependency review"
+        }
         Prompt::Group => "New group",
         Prompt::Rename => "Rename active group",
         Prompt::PatchExport => "New patch export directory",
@@ -704,6 +826,10 @@ pub(crate) fn run(options: Options) -> Result<()> {
         || options.snapshot.is_some()
         || options.base.is_some()
         || options.allow_partial
+        || !options.overrides.is_empty()
+        || !options.resolutions.is_empty()
+        || options.reason.is_some()
+        || options.acknowledge_evidence
     {
         bail!("Start --review without CLI grouping arguments; edit in the session");
     }
@@ -713,6 +839,7 @@ pub(crate) fn run(options: Options) -> Result<()> {
     let handle = std::thread::spawn(move || worker(rx_worker, tx_worker));
     let mut app = App::new(options.name, tx, rx);
     app.include_untracked_content = options.include_untracked_content;
+    app.provenance = options.provenance;
     let result = (|| -> Result<()> {
         enable_raw_mode()?;
         let _guard = crate::tui::TerminalGuard;
@@ -762,6 +889,12 @@ pub(crate) fn run_name(name: String, include_untracked_content: bool) -> Result<
         export_commits: None,
         base: None,
         allow_partial: false,
+        provenance: false,
+        evidence_json: false,
+        overrides: vec![],
+        resolutions: vec![],
+        reason: None,
+        acknowledge_evidence: false,
     })
 }
 
@@ -777,16 +910,19 @@ mod tests {
             snapshot_id: "capture".into(),
             groups: vec!["a".into(), "b".into()],
             assignments: vec![None, None],
+            evidence: None,
         };
         app.capture = Some(Capture {
             id: "capture".into(),
             base: "base".into(),
             units: vec![
                 UnitView {
+                    id: "u0".into(),
                     label: "file -1,3 +1,3".into(),
                     preview: "@@ first\n-old\n+new".into(),
                 },
                 UnitView {
+                    id: "u1".into(),
                     label: "file -20,3 +20,3".into(),
                     preview: "@@ second".into(),
                 },
@@ -933,5 +1069,112 @@ mod tests {
             .collect();
         assert!(!text.contains('\x1b'), "{text:?}");
         assert!(text.contains("\\u{1b}"), "{text:?}");
+    }
+    #[test]
+    fn evidence_decisions_survive_grouping_undo_and_acknowledgment_becomes_stale() {
+        use crate::untangle_evidence::{ReviewEvidence, UnitEvidence};
+        use weave::provenance_replay::{Attribution, Source};
+        let mut app = app();
+        let units = app
+            .capture
+            .as_ref()
+            .unwrap()
+            .units
+            .iter()
+            .map(|u| {
+                (
+                    u.id.clone(),
+                    UnitEvidence {
+                        path_hex: "66696c65".into(),
+                        attribution: Attribution {
+                            source: Source::Unknown,
+                            source_worktree: None,
+                            owner_task: None,
+                            author_agent: None,
+                            event_ids: vec![],
+                            snapshot_hash: "snapshot".into(),
+                            diagnostics: vec!["unobserved".into()],
+                        },
+                        original_patch_hex: "00".into(),
+                        current_patch_hex: "00".into(),
+                        requires_resolution: true,
+                        resolution: None,
+                    },
+                )
+            })
+            .collect();
+        app.plan.as_mut().unwrap().evidence = Some(ReviewEvidence {
+            schema_version: 1,
+            snapshot_id: "capture".into(),
+            base_commit: "base".into(),
+            replay: None,
+            units,
+            audit: vec![],
+            acknowledged: false,
+        });
+        fn enter(app: &mut App, text: &str) {
+            for c in text.chars() {
+                app.key(KeyCode::Char(c));
+            }
+            app.key(KeyCode::Enter);
+        }
+        app.key(KeyCode::Char('o'));
+        enter(&mut app, "asserted-agent");
+        enter(&mut app, "Human claim; not authenticated");
+        assert_eq!(
+            app.plan.as_ref().unwrap().evidence.as_ref().unwrap().units["u0"]
+                .attribution
+                .source,
+            Source::Manual
+        );
+        app.key(KeyCode::Char('a'));
+        enter(
+            &mut app,
+            "Reviewed attribution uncertainty and dependencies",
+        );
+        assert!(
+            app.plan
+                .as_ref()
+                .unwrap()
+                .evidence
+                .as_ref()
+                .unwrap()
+                .acknowledged
+        );
+        app.key(KeyCode::Char(' '));
+        assert!(
+            !app.plan
+                .as_ref()
+                .unwrap()
+                .evidence
+                .as_ref()
+                .unwrap()
+                .acknowledged
+        );
+        app.key(KeyCode::Char('u'));
+        let evidence = app.plan.as_mut().unwrap().evidence.as_mut().unwrap();
+        assert_eq!(evidence.units["u0"].attribution.source, Source::Manual);
+        assert_eq!(evidence.audit.len(), 4);
+        assert!(!evidence.acknowledged);
+        evidence
+            .units
+            .get_mut("u0")
+            .unwrap()
+            .attribution
+            .diagnostics
+            .push("bad\x1b]777;AUDIT\x07".into());
+        app.update_detail();
+        for (w, h) in [(40, 16), (1, 1), (140, 40)] {
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+            assert!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .all(|c| !c.symbol().contains('\x1b'))
+            );
+        }
     }
 }

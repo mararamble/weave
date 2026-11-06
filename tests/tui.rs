@@ -250,6 +250,72 @@ fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     (temp, repo, spaces)
 }
 #[test]
+fn provenance_keyboard_override_resolution_acknowledgment_and_successful_export() {
+    let (temp, repo, spaces) = fixture();
+    assert!(
+        weave(&repo, &spaces, &["new", "task", "--from", "main"])
+            .status
+            .success()
+    );
+    fs::write(spaces.join("task/file"), "changed\n").unwrap();
+    let cp = weave(
+        &repo,
+        &spaces,
+        &["provenance", "checkpoint", "task", "--key", "keyboard"],
+    );
+    assert!(
+        cp.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cp.stderr)
+    );
+    let before = source_state(&repo, &spaces, &["task"]);
+    let mut terminal = Terminal::with_args(
+        &repo,
+        &spaces,
+        &["untangle", "task", "--review", "--provenance"],
+    );
+    terminal.wait_for("UNASSIGNED");
+    terminal.send(b"gchange\r ");
+    terminal.wait_for("VerifiedWorktree");
+    terminal.send(b"omanual-agent\rHuman assertion from review\r");
+    terminal.wait_for("Evidence decision appended");
+    terminal.send(b"zKeep authorship unknown\r");
+    terminal.wait_for("Evidence decision appended");
+    terminal.send(b"aReviewed uncertainty and semantic dependencies\r");
+    terminal.wait_for("acknowledged=true");
+    terminal.send(b"v");
+    terminal.wait_for("Validation ready");
+    let destination = temp.path().join("keyboard-export");
+    terminal.send(format!("p{}\rexport\r", destination.display()).as_bytes());
+    terminal.wait_for("Export published");
+    terminal.send(b"q");
+    terminal.finish();
+    let evidence: serde_json::Value =
+        serde_json::from_slice(&fs::read(destination.join("provenance.json")).unwrap()).unwrap();
+    assert_eq!(evidence["acknowledged"], true);
+    assert!(
+        evidence["units"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|u| u["attribution"]["source"] == "unknown")
+    );
+    let audit: serde_json::Value =
+        serde_json::from_slice(&fs::read(destination.join("audit.json")).unwrap()).unwrap();
+    let actions = audit["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["action"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        actions.contains(&"manual_override")
+            && actions.contains(&"leave_unknown")
+            && actions.contains(&"export_acknowledgment")
+    );
+    assert_eq!(source_state(&repo, &spaces, &["task"]), before);
+}
+#[test]
 fn keyboard_create_preview_cancel_remove_and_terminal_cleanup() {
     let (_temp, repo, spaces) = fixture();
     let mut terminal = Terminal::new(&repo, &spaces);

@@ -30,10 +30,12 @@ mod changeset;
 mod git_process;
 mod integration;
 mod overlap;
+mod provenance_cli;
 mod reconcile;
 mod removal;
 mod tui;
 mod untangle;
+mod untangle_evidence;
 mod untangle_export;
 mod untangle_review;
 mod workspace;
@@ -54,6 +56,8 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
+    /// Explicit opt-in provenance checkpoints, deterministic replay and storage maintenance
+    Provenance(provenance_cli::Options),
     /// Untangle a workspace by grouping and validating changes without modifying it
     Untangle(untangle::Options),
     /// Open the interactive workspace browser
@@ -355,6 +359,7 @@ fn run(command: Option<Commands>) -> Result<()> {
     match command {
         None => tui::run(false)?,
         Some(Commands::Untangle(options)) => untangle::show(options)?,
+        Some(Commands::Provenance(options)) => provenance_cli::run(options)?,
         Some(Commands::Tui {
             include_untracked_content,
         }) => tui::run(include_untracked_content)?,

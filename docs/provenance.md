@@ -1,9 +1,10 @@
-# Optional provenance schema foundation (WEV-19)
+# Optional provenance event contract (WEV-19)
 
-`weave::provenance` defines a standalone event contract. Nothing invokes it from
-the CLI, TUI, collector or Git operations. Capture remains disabled and ordinary
-Git workflows, privacy exclusions and existing schema-v1 outputs are unchanged.
-This is a foundation, not completion of WEV-19 or its dependency gate for WEV-38.
+`weave::provenance` defines the immutable event contract used by explicit
+checkpoints, the append-only store and deterministic replay. Capture is opt-in:
+ordinary Git, CLI and TUI workflows do not create or require a provenance store.
+See [collection, recovery, replay and review](provenance-workflow.md) for the
+consumer contracts, privacy rules, commands and verification limits.
 
 ## Wire contract
 
@@ -68,13 +69,19 @@ numbers do not prove capture completeness, and detection cannot prove that the
 underlying log was not tampered with. The deterministic fixture tests the wire
 contract and ordering only; it is neither replay nor concurrent-capture evidence.
 
-## Remaining work
+## Consumers and verification boundary
 
-The rest of WEV-19 still needs explicit checkpoint/optional hook capture, stable
-ID lifecycle, a local content-addressed store, atomic writes and crash recovery,
-append-only/tamper and partial-write tests, same-file concurrent-write evidence,
-gap detection in actual logs, deterministic replay, opt-out/privacy controls,
-bounded retention and user-controlled pruning. No collector, hidden monitoring,
-content store, hooks, retention or replay engine ships in this slice. Advanced
-collector/replay consumers in WEV-38/39 require their own reviewed scope; the
-schema foundation does not unblock them by itself.
+WEV-38 supplies the checkpoint collector, journal/blob store, serialized writes,
+idempotent retry keys, explicit recovery and confirmed pruning. WEV-39 verifies
+content and ordering and produces a separately versioned replay report consumed
+by provenance-aware Untangle. Their fixtures cover actual persistence, gaps,
+tampering, partial publication and concurrent recording; the original schema
+fixture remains a schema fixture rather than being relabeled as replay proof.
+
+No daemon, filesystem watcher or tool-specific hook is installed. Embedders can
+submit checkpoint observations through `Store::append_checkpoint` and supply an
+explicitly trusted `ActorVerifier` for authenticated tool-write receipts. The CLI
+has no trusted actor adapter: checkpoint evidence can establish worktree origin,
+and supplied agent names remain manual assertions. The schema's `verified` value
+alone never authenticates an agent. Platform and SSH verification gates are
+reported separately in the README roadmap and implementation reports.

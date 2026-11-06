@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "fixture": "provenance_storage::deterministic_replay_keeps_worktree_owner_and_author_separate_and_corrections_append (before correction)",
+  "report_sha256": "0582597ff7a06e5995c1b1ee8e13c60ed10d5a48420cc06a2bad3a1b4c17215a"
+}

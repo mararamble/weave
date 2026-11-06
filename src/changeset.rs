@@ -394,7 +394,7 @@ pub(crate) fn parse_path_list(bytes: &[u8]) -> Result<Vec<&[u8]>> {
 
 const FILE_LIMIT: u64 = 1024 * 1024;
 const TOTAL_LIMIT: u64 = 8 * 1024 * 1024;
-fn sensitive(path: &[u8]) -> bool {
+pub(crate) fn sensitive(path: &[u8]) -> bool {
     let parts: Vec<_> = path.split(|b| *b == b'/').collect();
     if parts
         .windows(2)
@@ -433,7 +433,7 @@ fn sensitive(path: &[u8]) -> bool {
     })
 }
 #[cfg(unix)]
-fn open_untracked(root: &Path, path: &[u8]) -> Result<std::fs::File> {
+pub(crate) fn open_untracked(root: &Path, path: &[u8]) -> Result<std::fs::File> {
     use std::{
         ffi::CString,
         os::fd::{AsRawFd, FromRawFd},
@@ -463,7 +463,7 @@ fn open_untracked(root: &Path, path: &[u8]) -> Result<std::fs::File> {
     Ok(dir)
 }
 #[cfg(not(unix))]
-fn open_untracked(_root: &Path, _path: &[u8]) -> Result<std::fs::File> {
+pub(crate) fn open_untracked(_root: &Path, _path: &[u8]) -> Result<std::fs::File> {
     bail!("safe untracked reads are unavailable on this platform")
 }
 fn capture(root: &Path, raw: &[u8], total: &mut u64) -> Change {

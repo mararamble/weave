@@ -240,6 +240,13 @@ Weave identifies files modified by multiple workspaces and, when analysis is sup
 
 ## Untangle grouping, review and export
 
+Optional provenance recording and review are available through
+`weave provenance checkpoint NAME --key KEY` and
+`weave untangle NAME --provenance --review`. Capture stays opt-in. Checkpoints
+establish worktree evidence; supplied agent names remain manual assertions.
+Provenance exports require explicit evidence review and include separate audit
+sidecars. See [provenance workflows, privacy and recovery](docs/provenance-workflow.md).
+
 ```bash
 weave untangle auth --json
 # Copy snapshot.id and unit IDs from that capture:
@@ -712,9 +719,11 @@ Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and
 | 04 | Non-destructive integration planning and review branches | Implemented; untracked content requires opt-in; validation uses a minimal environment but is not sandboxed |
 | 05 | Ratatui terminal interface | Implemented; local and SSH launch/create/exit smoke tests passed |
 | 05c | TUI-first parity and keyboard workflows (WEV-36) | Implemented: ordered review and integration, confirmed mutations, paged diffs, keyboard palette, narrow layouts, local and SSH smoke tests; limits documented |
-| 06 | Vineweaver engine | Implemented: snapshot-scoped hunk/whole-file assignment and isolated validation; untracked content requires opt-in |
-| 06b | Vineweaver review and Untangle export (WEV-18) | Implemented, SSH verification pending: local TUI review, ordering/undo, verified patch and independent-commit bundle exports |
-| 06c | Optional provenance (WEV-19) | Schema foundation only: [event and evidence contract](docs/provenance.md); capture, storage, concurrency and replay remain pending; WEV-19 is incomplete |
+| 06 | Vineweaver engine (WEV-17) | Snapshot grouping and isolated validation implemented; opt-in replay evidence, immutable original patches and explicit same-file/cross-worktree uncertainty added. Independent audit cleared after remediation; macOS checks passed; Linux verification pending |
+| 06b | Vineweaver review and Untangle export (WEV-18) | Opt-in evidence/timeline review, reasoned manual overrides, retained audit, conflict/unknown decisions and acknowledged patch/bundle export with sidecars implemented. Independent audit and local keyboard export passed; Linux and full SSH restoration verification pending |
+| 06c | Optional provenance (WEV-19) | [Event contract](docs/provenance.md) integrated with explicit capture, storage and replay below; no hidden monitoring or built-in trusted agent hook. Independent audit and macOS checks passed; Linux verification pending |
+| 06d | Append-only provenance collector (WEV-38) | Opt-in filtered checkpoints, serialized/idempotent writes, bounded blobs/journal, explicit recovery and confirmed orphan pruning implemented; independent audit and macOS checks passed; Linux verification pending |
+| 06e | Provenance replay (WEV-39) | Deterministic report, fixed checksum fixture, hash/order/snapshot-reference validation, corrections and conservative hunk reconciliation implemented; authenticated actor integration is an explicit embedding API. Independent audit and macOS checks passed; Linux verification pending |
 | 07 | SSH remote linking | Planned |
 | 08 | Remote uncommitted snapshots | Planned |
 | 09 | Distributed integration | Planned |

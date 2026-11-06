@@ -8,6 +8,23 @@ use std::{collections::HashSet, path::Path};
 #[derive(Args)]
 pub(crate) struct Options {
     pub name: String,
+    /// Review recorded provenance using a separate evidence contract
+    #[arg(long)]
+    pub provenance: bool,
+    /// Emit the separately versioned evidence report, preserving ordinary JSON v1
+    #[arg(long, requires = "provenance", conflicts_with_all=["json","review","export_patches","export_commits"])]
+    pub evidence_json: bool,
+    /// UNIT=AGENT manual assertion; requires --reason and never verifies authorship
+    #[arg(long="override-author", requires_all=["provenance","reason","snapshot"])]
+    pub overrides: Vec<String>,
+    /// Explicitly leave conflicting evidence unknown; requires --reason
+    #[arg(long="resolve-unknown", requires_all=["provenance","reason","snapshot"])]
+    pub resolutions: Vec<String>,
+    #[arg(long, requires = "provenance")]
+    pub reason: Option<String>,
+    /// Acknowledge attribution uncertainty and semantic dependency review for export
+    #[arg(long, requires = "provenance")]
+    pub acknowledge_evidence: bool,
     /// Allow capture and export of untracked file content
     #[arg(long)]
     pub include_untracked_content: bool,
@@ -152,6 +169,7 @@ pub(crate) struct Engine {
     pub(crate) temp: tempfile::TempDir,
     pub snapshot: Snapshot,
     pub groups: Vec<Group>,
+    pub evidence: Option<crate::untangle_evidence::ReviewEvidence>,
     include_untracked_content: bool,
 }
 fn diagnostic(code: &str, message: impl Into<String>) -> Diagnostic {
@@ -368,6 +386,7 @@ impl Engine {
                 units,
             },
             groups: Vec::new(),
+            evidence: None,
             include_untracked_content,
         };
         engine.verify_source()?;
@@ -489,6 +508,7 @@ impl Engine {
     }
     pub(crate) fn validate(&self) -> Result<Preview<'_>> {
         self.verify_source()?;
+        self.verify_evidence()?;
         let dir = self.temp.path();
         let base = &self.snapshot.base_commit;
         let mut applications = Vec::new();
@@ -568,6 +588,9 @@ pub(crate) fn show(options: Options) -> Result<()> {
         return crate::untangle_review::run(options);
     }
     let mut engine = Engine::capture(&options.name, options.include_untracked_content)?;
+    if options.provenance {
+        engine.enable_evidence()?;
+    }
     if let Some(expected) = &options.snapshot
         && expected != &engine.snapshot.id
     {
@@ -611,6 +634,45 @@ pub(crate) fn show(options: Options) -> Result<()> {
             .groups
             .sort_by_key(|g| options.order.iter().position(|n| n == &g.name).unwrap());
     }
+    for value in &options.overrides {
+        let (unit, agent) = value
+            .split_once('=')
+            .context("Use --override-author UNIT=AGENT")?;
+        engine
+            .evidence
+            .as_mut()
+            .context("Enable provenance")?
+            .resolve(
+                unit,
+                Some(agent),
+                options
+                    .reason
+                    .as_deref()
+                    .context("Override requires --reason")?,
+            )?;
+    }
+    for unit in &options.resolutions {
+        engine
+            .evidence
+            .as_mut()
+            .context("Enable provenance")?
+            .resolve(
+                unit,
+                None,
+                options
+                    .reason
+                    .as_deref()
+                    .context("Resolution requires --reason")?,
+            )?;
+    }
+    if options.acknowledge_evidence {
+        engine.evidence.as_mut().context("Enable provenance")?.acknowledge("Explicit CLI acknowledgment of attribution uncertainty and semantic dependency review")?;
+    }
+    if options.evidence_json {
+        engine.validate()?;
+        println!("{}", serde_json::to_string_pretty(&engine.evidence)?);
+        return Ok(());
+    }
     if options.export_patches.is_some() || options.export_commits.is_some() {
         let (destination, kind) = if let Some(path) = &options.export_patches {
             (path, crate::untangle_export::Kind::Patches)
@@ -639,6 +701,9 @@ pub(crate) fn show(options: Options) -> Result<()> {
     if options.json {
         println!("{}", serde_json::to_string_pretty(&preview)?);
     } else {
+        if let Some(evidence) = &engine.evidence {
+            humanln!("{}", evidence.summary());
+        }
         humanln!(
             "Snapshot {}\nBase {}\nCaptured tree {}",
             engine.snapshot.id,
