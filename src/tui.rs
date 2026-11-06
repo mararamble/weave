@@ -12,13 +12,10 @@ use ratatui::{
 use serde_json::Value;
 use std::{
     io::{self, Read, Seek, SeekFrom, Write},
-    process::{Command, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, Sender},
-    },
-    time::Duration,
+    process::Command,
+    sync::mpsc::{self, Receiver, Sender},
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
 
 const DIFF_PAGE_SIZE: u64 = 64 * 1024;
@@ -40,14 +37,14 @@ pub(crate) fn safe(s: &str) -> String {
 fn value_str<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
-fn command(args: &[String]) -> Result<Value> {
-    let mut cmd = Command::new(std::env::current_exe()?);
-    cmd.args(args);
-    let out = crate::git_process::bounded_output(&mut cmd, 32 * 1024 * 1024)?;
-    if !out.status.success() {
-        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok(serde_json::from_slice(&out.stdout)?)
+fn command(args: &[String], control: &crate::tui_process::Control) -> Result<Value> {
+    let capture = crate::tui_process::read(args, control, Some(32 * 1024 * 1024))?;
+    Ok(serde_json::from_str(&capture.text()?)?)
+}
+struct ReadTask {
+    control: crate::tui_process::Control,
+    handle: JoinHandle<()>,
+    listing: bool,
 }
 #[derive(Clone)]
 struct File {
@@ -107,7 +104,11 @@ struct App {
     editing: bool,
     review: String,
     diff_file: Option<(std::fs::File, u64, u64)>,
-    diff_cancel: Arc<AtomicBool>,
+    read_task: Option<ReadTask>,
+    mutation_task: Option<JoinHandle<()>>,
+    working: Option<(String, Instant)>,
+    quit_pending: bool,
+    exit_error: Option<String>,
     review_scroll: usize,
     message: String,
     help: bool,
@@ -133,7 +134,11 @@ impl App {
             editing: false,
             review: String::new(),
             diff_file: None,
-            diff_cancel: Arc::new(AtomicBool::new(false)),
+            read_task: None,
+            mutation_task: None,
+            working: None,
+            quit_pending: false,
+            exit_error: None,
             review_scroll: 0,
             message: "Loading workspaces…".into(),
             help: false,
@@ -160,17 +165,99 @@ impl App {
             .and_then(|i| self.workspaces.get(*i))
             .map(|w| value_str(w, "name").to_owned())
     }
+    fn clear_listing(&mut self) {
+        self.workspaces.clear();
+        self.marked.clear();
+        self.files.clear();
+        self.files_owner = None;
+        self.selected = 0;
+        self.file_selected = 0;
+        self.diff_file = None;
+    }
+    fn stop_read(&mut self) -> Result<bool> {
+        let Some(task) = self.read_task.take() else {
+            return Ok(false);
+        };
+        task.control.cancel();
+        let joined = task.handle.join();
+        if task.listing {
+            self.clear_listing();
+        }
+        if !task.control.stopped() {
+            bail!(
+                "Read cleanup could not be verified; inspect the child process before continuing: {}",
+                task.control
+                    .cleanup_error()
+                    .unwrap_or_else(|| "unknown child cleanup failure".into())
+            );
+        }
+        joined.map_err(|_| anyhow::anyhow!("Read worker failed after child cleanup"))?;
+        Ok(true)
+    }
+    fn prepare_task(&mut self, label: &str) -> bool {
+        if let Err(error) = self.stop_read() {
+            self.focus = Focus::Review;
+            self.review = format!("{error:#}");
+            self.message = "Read cleanup failed; inspect review".into();
+            return false;
+        }
+        self.generation += 1;
+        self.working = Some((label.to_owned(), Instant::now()));
+        self.message = format!("{label}… Esc cancels read; q/Ctrl-C quits");
+        true
+    }
+    fn cancel_read(&mut self) {
+        match self.stop_read() {
+            Ok(true) => {
+                self.generation += 1;
+                self.working = None;
+                self.message = "Read cancelled; child process stopped and reaped".into();
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.working = None;
+                self.focus = Focus::Review;
+                self.review = format!("{error:#}");
+                self.message = "Read cancellation failed; inspect review".into();
+            }
+        }
+    }
+    fn status_message(&self) -> String {
+        if let Some((label, started)) = &self.working {
+            if self.quit_pending && self.mutating {
+                return format!(
+                    "Finishing operation, will exit when done · {label} · {}s elapsed",
+                    started.elapsed().as_secs()
+                );
+            }
+            return format!(
+                "{} · {label} · {}s elapsed",
+                self.message,
+                started.elapsed().as_secs()
+            );
+        }
+        self.message.clone()
+    }
     fn start(&mut self, args: Vec<String>, kind: u8) {
-        self.diff_cancel.store(true, Ordering::Release);
+        let label = match args.first().map(String::as_str) {
+            Some("list") => "Listing workspaces",
+            Some("plan") => "Planning integration",
+            Some("overlaps") => "Reviewing overlaps",
+            Some("status") => "Inspecting repository status",
+            _ => "Inspecting workspace",
+        };
+        if !self.prepare_task(label) {
+            return;
+        }
         if kind >= 2 {
             self.diff_file = None;
         }
-        self.generation += 1;
         let id = self.generation;
         let tx = self.tx.clone();
-        self.message = "Loading… (q quits immediately)".into();
-        std::thread::spawn(move || {
-            let result = command(&args);
+        let control = crate::tui_process::Control::new();
+        let worker_control = control.clone();
+        let handle = std::thread::spawn(move || {
+            let result = command(&args, &worker_control);
             let _ = tx.send(match kind {
                 0 => Message::List(id, result),
                 1 => Message::Files(id, result),
@@ -178,16 +265,28 @@ impl App {
                 _ => Message::Inspect(id, result),
             });
         });
+        self.read_task = Some(ReadTask {
+            control,
+            handle,
+            listing: kind == 0,
+        });
     }
     fn operation(&mut self, args: Vec<String>) {
-        self.diff_cancel.store(true, Ordering::Release);
+        let label = match args.first().map(String::as_str) {
+            Some("new") => "Creating workspace",
+            Some("remove") => "Removing workspace",
+            _ => "Integrating workspaces (including validation)",
+        };
+        if !self.prepare_task(label) {
+            return;
+        }
         self.diff_file = None;
-        self.generation += 1;
         let id = self.generation;
         let tx = self.tx.clone();
         self.mutating = true;
-        self.message = "Applying operation… please wait".into();
-        std::thread::spawn(move || {
+        self.message =
+            "Applying operation… q/Ctrl-C exits after it finishes; Esc cannot stop it".into();
+        self.mutation_task = Some(std::thread::spawn(move || {
             let result = (|| -> Result<String> {
                 let mut cmd = Command::new(std::env::current_exe()?);
                 cmd.args(&args);
@@ -198,7 +297,7 @@ impl App {
                 Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
             })();
             let _ = tx.send(Message::Operation(id, result));
-        });
+        }));
     }
     fn removal_preview(&mut self) {
         let Some(name) = self.name() else { return };
@@ -208,29 +307,31 @@ impl App {
         );
     }
     fn text_command(&mut self, args: Vec<String>, label: &str) {
-        self.diff_cancel.store(true, Ordering::Release);
-        self.generation += 1;
+        if !self.prepare_task(label) {
+            return;
+        }
         let id = self.generation;
         let tx = self.tx.clone();
         self.focus = Focus::Review;
         self.diff_file = None;
         self.review_scroll = 0;
         self.review = format!("Loading {label}…");
-        self.message = format!("Loading {label}…");
         let label = label.to_owned();
-        std::thread::spawn(move || {
+        let control = crate::tui_process::Control::new();
+        let worker_control = control.clone();
+        let handle = std::thread::spawn(move || {
             let result = (|| -> Result<String> {
-                let mut cmd = Command::new(std::env::current_exe()?);
-                cmd.args(args);
-                let out = crate::git_process::bounded_output(&mut cmd, 32 * 1024 * 1024)?;
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                if !out.status.success() {
-                    bail!("{}{}", stdout, stderr);
-                }
-                Ok(format!("{}{}", stdout, stderr))
+                let capture =
+                    crate::tui_process::read(&args, &worker_control, Some(32 * 1024 * 1024))?;
+                let stderr = String::from_utf8_lossy(&capture.stderr).into_owned();
+                Ok(format!("{}{stderr}", capture.text()?))
             })();
             let _ = tx.send(Message::Text(id, label, result));
+        });
+        self.read_task = Some(ReadTask {
+            control,
+            handle,
+            listing: false,
         });
     }
     fn selected_names(&self) -> Vec<String> {
@@ -425,13 +526,14 @@ impl App {
             .visible()
             .get(self.selected)
             .and_then(|i| self.workspaces.get(*i))
+            .cloned()
         {
-            self.diff_cancel.store(true, Ordering::Release);
+            self.cancel_read();
             self.generation += 1;
             self.diff_file = None;
             self.focus = Focus::Review;
             self.review_scroll = 0;
-            self.review = serde_json::to_string_pretty(item).unwrap_or_default();
+            self.review = serde_json::to_string_pretty(&item).unwrap_or_default();
             self.message = "Selected workspace details".into();
         }
     }
@@ -469,11 +571,12 @@ impl App {
         self.review_scroll = 0;
         self.review.clear();
         self.diff_file = None;
-        self.diff_cancel.store(true, Ordering::Release);
-        self.diff_cancel = Arc::new(AtomicBool::new(false));
-        self.generation += 1;
+        if !self.prepare_task("Streaming diff") {
+            return;
+        }
         let id = self.generation;
         if file.untracked {
+            self.working = None;
             if file.detail.len() as u64 > DIFF_PAGE_SIZE {
                 let result = (|| -> Result<std::fs::File> {
                     let mut spool = tempfile::tempfile()?;
@@ -496,99 +599,29 @@ impl App {
             }
             return;
         }
-        self.message = "Streaming diff…".into();
         let tx = self.tx.clone();
-        let include_untracked_content = self.include_untracked_content;
-        let cancel = Arc::clone(&self.diff_cancel);
-        std::thread::spawn(move || {
-            let result = crate::git_process::cancellable(
-                Arc::clone(&cancel),
-                || -> Result<(std::fs::File, u64)> {
-                    // Repeat the CLI collector's validation immediately before reading a patch.
-                    let changeset = crate::changeset::collect(&name, include_untracked_content)?;
-                    let record = crate::workspace::get(&name)?;
-                    let path = path_from_hex(&file.hex)?;
-                    let mut cmd =
-                        crate::git_process::command_at(std::path::Path::new(&record.path));
-                    cmd.args([
-                        "diff",
-                        "--no-ext-diff",
-                        "--no-textconv",
-                        "--no-color",
-                        "--binary",
-                        "--no-renames",
-                        &changeset.base_commit,
-                        "--",
-                    ])
-                    .arg(path)
-                    .env("GIT_LITERAL_PATHSPECS", "1")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                    if let Some(previous) = &file.previous_hex {
-                        cmd.arg(path_from_hex(previous)?);
-                    }
-                    let mut spool =
-                        tempfile::tempfile().context("Cannot create temporary diff file")?;
-                    let mut child = crate::git_process::spawn(&mut cmd)?;
-                    let mut out = child.stdout.take().context("Missing diff output")?;
-                    let mut stderr = child
-                        .stderr
-                        .take()
-                        .context("Missing Git diff error output")?;
-                    let stderr_reader = std::thread::spawn(move || -> io::Result<Vec<u8>> {
-                        let mut saved = Vec::new();
-                        let mut buffer = [0; 8192];
-                        loop {
-                            let n = stderr.read(&mut buffer)?;
-                            if n == 0 {
-                                break;
-                            }
-                            let keep = n.min(65536usize.saturating_sub(saved.len()));
-                            saved.extend_from_slice(&buffer[..keep]);
-                        }
-                        Ok(saved)
-                    });
-                    let mut total = 0_u64;
-                    let mut buf = [0; 8192];
-                    loop {
-                        if cancel.load(Ordering::Acquire) {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            bail!("Diff cancelled");
-                        }
-                        let n = match out.read(&mut buf) {
-                            Ok(n) => n,
-                            Err(error) => {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                                return Err(error).context("Cannot read Git diff");
-                            }
-                        };
-                        if n == 0 {
-                            break;
-                        }
-                        if let Err(error) = spool.write_all(&buf[..n]) {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            return Err(error).context("Cannot write temporary diff file");
-                        }
-                        total += n as u64;
-                    }
-                    let status = child.wait()?;
-                    let stderr = stderr_reader
-                        .join()
-                        .map_err(|_| anyhow::anyhow!("Git diff error reader failed"))??;
-                    if !status.success() {
-                        bail!(
-                            "Git diff failed: {}",
-                            String::from_utf8_lossy(&stderr).trim()
-                        );
-                    }
-                    Ok((spool, total))
-                },
-            );
+        let mut args = vec![
+            "__tui-read-diff".into(),
+            format!("--workspace={name}"),
+            format!("--path-hex={}", file.hex),
+        ];
+        if self.include_untracked_content {
+            args.push("--include-untracked-content".into());
+        }
+        if let Some(previous) = file.previous_hex {
+            args.push(format!("--previous-hex={previous}"));
+        }
+        let control = crate::tui_process::Control::new();
+        let worker_control = control.clone();
+        let handle = std::thread::spawn(move || {
+            let result = crate::tui_process::read(&args, &worker_control, None)
+                .map(|capture| (capture.stdout, capture.len));
             let _ = tx.send(Message::Diff(id, result));
+        });
+        self.read_task = Some(ReadTask {
+            control,
+            handle,
+            listing: false,
         });
     }
     fn diff_page(&mut self, next: bool) {
@@ -652,6 +685,24 @@ impl App {
     }
     fn receive(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
+            let id = match &msg {
+                Message::List(id, _)
+                | Message::Files(id, _)
+                | Message::Review(id, _)
+                | Message::Inspect(id, _)
+                | Message::Text(id, _, _)
+                | Message::Diff(id, _)
+                | Message::Operation(id, _) => *id,
+            };
+            if id != self.generation {
+                continue;
+            }
+            self.working = None;
+            if !matches!(&msg, Message::Operation(..))
+                && let Some(task) = self.read_task.take()
+            {
+                let _ = task.handle.join();
+            }
             match msg {
                 Message::List(id, result) if id == self.generation => match result {
                     Ok(v) => {
@@ -680,15 +731,8 @@ impl App {
                             format!("{} workspaces; Enter opens files", self.workspaces.len());
                     }
                     Err(e) => {
-                        // A failed refresh is not a complete listing. Invalidate
-                        // cached selection so reviews cannot use stale rows.
-                        self.workspaces.clear();
-                        self.marked.clear();
-                        self.files.clear();
-                        self.files_owner = None;
-                        self.selected = 0;
-                        self.file_selected = 0;
-                        self.diff_file = None;
+                        // A failed refresh cannot authorize a stale selection.
+                        self.clear_listing();
                         self.focus = Focus::Review;
                         self.review_scroll = 0;
                         self.review = format!("Workspace listing failed:\n{e:#}");
@@ -758,13 +802,22 @@ impl App {
                 },
                 Message::Operation(id, result) if id == self.generation => {
                     self.mutating = false;
+                    if let Some(task) = self.mutation_task.take() {
+                        let _ = task.join();
+                    }
                     self.focus = Focus::Review;
                     match result {
                         Ok(output) => {
                             self.review = format!("Operation complete.\n{output}");
-                            self.refresh();
+                            if !self.quit_pending {
+                                self.refresh();
+                            }
                         }
                         Err(e) => {
+                            if self.quit_pending {
+                                self.exit_error =
+                                    Some(format!("Operation failed before exit: {e:#}"));
+                            }
                             self.review = format!("Operation failed:\n{e:#}");
                             self.message = "Operation failed; inspect review".into();
                         }
@@ -787,7 +840,10 @@ impl App {
 }
 impl Drop for App {
     fn drop(&mut self) {
-        self.diff_cancel.store(true, Ordering::Release);
+        let _ = self.stop_read();
+        if let Some(task) = self.mutation_task.take() {
+            let _ = task.join();
+        }
     }
 }
 fn make_files(v: &Value) -> Vec<File> {
@@ -845,7 +901,7 @@ fn make_files(v: &Value) -> Vec<File> {
     }
     files
 }
-fn path_from_hex(hex: &str) -> Result<std::ffi::OsString> {
+pub(crate) fn path_from_hex(hex: &str) -> Result<std::ffi::OsString> {
     if !hex.is_ascii() || !hex.len().is_multiple_of(2) {
         bail!("Invalid path encoding");
     }
@@ -967,12 +1023,24 @@ pub(crate) fn run(include_untracked_content: bool) -> Result<()> {
         let mut vineweaver = None;
         loop {
             app.receive();
+            if app.quit_pending && !app.mutating {
+                break;
+            }
             terminal.draw(|f| draw(f, &app))?;
             if event::poll(Duration::from_millis(50))?
                 && let Event::Key(k) = event::read()?
                 && k.kind != KeyEventKind::Release
             {
                 if app.mutating {
+                    if k.code == KeyCode::Char('q')
+                        || (k.code == KeyCode::Char('c')
+                            && k.modifiers.contains(KeyModifiers::CONTROL))
+                    {
+                        app.quit_pending = true;
+                        app.message = "Finishing operation, will exit when done".into();
+                    } else if k.code == KeyCode::Esc && !app.quit_pending {
+                        app.message = "Operation cannot be cancelled safely; q/Ctrl-C exits after it finishes".into();
+                    }
                     continue;
                 }
                 if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1092,6 +1160,7 @@ pub(crate) fn run(include_untracked_content: bool) -> Result<()> {
                         };
                     }
                     KeyCode::Esc => {
+                        app.cancel_read();
                         app.help = false;
                         app.focus = Focus::Workspaces;
                     }
@@ -1130,6 +1199,7 @@ pub(crate) fn run(include_untracked_content: bool) -> Result<()> {
         }
         drop(terminal);
         drop(guard);
+        app.stop_read()?;
         if let Some(name) = vineweaver {
             if let Err(error) = crate::untangle_review::run_name(name, include_untracked_content) {
                 app.focus = Focus::Review;
@@ -1140,6 +1210,12 @@ pub(crate) fn run(include_untracked_content: bool) -> Result<()> {
             continue;
         }
         break;
+    }
+    if let Some(error) = app.exit_error.take() {
+        bail!("{error}");
+    }
+    if app.quit_pending {
+        humanerrln!("Operation finished; exiting.");
     }
     Ok(())
 }
@@ -1288,7 +1364,7 @@ fn draw(f: &mut Frame, app: &App) {
             }
         }
     } else if app.help {
-        "q back/quit · Ctrl-C quit · ↑/↓ or j/k move · h/l or Tab switch pane\nEnter open workspace/file · Esc workspace pane\n/ filter workspaces · Space mark in integration order\nn new workspace · D removal preview · d remove · i integrate\ns repository status · w workspace details · c reconcile · : action palette\no overlap review · p integration preview · r refresh\nt diff statistics · J diff JSON · [ / ] diff page\nu open selected workspace in Vineweaver review\nPageUp/PageDown scroll review\nReviews and integration use marks in order, or all if none marked.".to_string()
+        "q back/quit · Ctrl-C quit (mutations finish first) · Esc cancels reads\n↑/↓ or j/k move · h/l or Tab switch pane\nEnter open workspace/file · Esc workspace pane\n/ filter workspaces · Space mark in integration order\nn new workspace · D removal preview · d remove · i integrate\ns repository status · w workspace details · c reconcile · : action palette\no overlap review · p integration preview · r refresh\nt diff statistics · J diff JSON · [ / ] diff page\nu open selected workspace in Vineweaver review\nPageUp/PageDown scroll review\nReviews and integration use marks in order, or all if none marked.".to_string()
     } else {
         app.review.lines().map(safe).collect::<Vec<_>>().join("\n")
     };
@@ -1319,7 +1395,7 @@ fn draw(f: &mut Frame, app: &App) {
     f.render_widget(
         Paragraph::new(format!(
             "{}\n{}",
-            safe(&app.message),
+            safe(&app.status_message()),
             if app.editing {
                 "Filter: type, Enter to finish"
             } else {

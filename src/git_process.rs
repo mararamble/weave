@@ -55,10 +55,43 @@ pub(crate) fn command() -> Command {
 
 /// Run a configured argument-vector command and preserve its exit status for callers.
 pub(crate) fn output(command: &mut Command) -> Result<Output> {
+    if let Some(output) = cancellable_output(command, None, None)? {
+        return Ok(output);
+    }
     check_cancelled()?;
     let result = command.output().map_err(launch_error);
     check_cancelled()?;
     result
+}
+
+/// Only the explicit Vineweaver cancellation scope opts into owned process-group
+/// termination. Validation commands and source mutations never set that scope.
+pub(crate) fn cancellable_output(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    limit: Option<usize>,
+) -> Result<Option<Output>> {
+    let Some(flag) = CANCEL.with(|cell| cell.borrow().clone()) else {
+        return Ok(None);
+    };
+    if let Some(input) = input {
+        use std::io::{Seek, Write};
+        let mut file = tempfile::tempfile()?;
+        file.write_all(input)?;
+        file.rewind()?;
+        command.stdin(file);
+    } else {
+        command.stdin(Stdio::null());
+    }
+    let control = crate::tui_process::Control::with_flag(flag);
+    let capture = crate::tui_process::capture(
+        command,
+        &control,
+        limit.map(|n| n as u64),
+        if limit.is_some() { 65536 } else { usize::MAX },
+    )?;
+    check_cancelled()?;
+    Ok(Some(capture.into_output()?))
 }
 
 /// Spawn a configured command when a caller needs bounded streaming or stdin.
@@ -68,6 +101,9 @@ pub(crate) fn spawn(command: &mut Command) -> Result<Child> {
 }
 /// Capture bounded stdout while draining stderr to avoid pipe deadlocks.
 pub(crate) fn bounded_output(command: &mut Command, limit: usize) -> Result<Output> {
+    if let Some(output) = cancellable_output(command, None, Some(limit))? {
+        return Ok(output);
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

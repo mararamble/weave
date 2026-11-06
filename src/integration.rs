@@ -69,6 +69,11 @@ pub(crate) fn run_with(
     } else {
         Stdio::null()
     });
+    if let Some(output) =
+        crate::git_process::cancellable_output(&mut command, input, Some(16 * 1024 * 1024))?
+    {
+        return Ok(output);
+    }
     let mut child = crate::git_process::spawn(&mut command)
         .context("Could not run Git for integration preview")?;
     let writer = input.map(|bytes| {

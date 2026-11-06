@@ -23,7 +23,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 fn bail_result(message: &str) -> Result<()> {
     Err(anyhow::anyhow!("{message}"))
@@ -183,6 +183,7 @@ struct App {
     prompt: Option<Prompt>,
     input: String,
     busy: bool,
+    started: Option<Instant>,
     cancel: Arc<AtomicBool>,
     tx: Sender<Job>,
     rx: Receiver<Message>,
@@ -209,6 +210,7 @@ impl App {
             prompt: None,
             input: String::new(),
             busy: false,
+            started: None,
             cancel: Arc::new(AtomicBool::new(false)),
             tx,
             rx,
@@ -217,9 +219,21 @@ impl App {
             provenance: false,
         }
     }
+    fn status_message(&self) -> String {
+        if let Some(started) = self.started {
+            format!(
+                "{} · {}s elapsed",
+                self.message,
+                started.elapsed().as_secs()
+            )
+        } else {
+            self.message.clone()
+        }
+    }
     fn token(&mut self) -> Arc<AtomicBool> {
         self.cancel = Arc::new(AtomicBool::new(false));
         self.busy = true;
+        self.started = Some(Instant::now());
         self.cancel.clone()
     }
     fn capture(&mut self) {
@@ -343,6 +357,7 @@ impl App {
     fn receive(&mut self) {
         while let Ok(message) = self.rx.try_recv() {
             self.busy = false;
+            self.started = None;
             match message {
                 Message::Captured(result) => match result {
                     Ok(c) => {
@@ -608,7 +623,7 @@ impl App {
                 self.prompt=Some(match key {KeyCode::Char('o')=>Prompt::OverrideAgent,KeyCode::Char('z')=>Prompt::EvidenceReason(None),_=>Prompt::AcknowledgeEvidence});self.input.clear();
             }
             KeyCode::Char('q')=>{self.cancel.store(true,Ordering::Release);return true;}
-            KeyCode::Esc=>{self.cancel.store(true,Ordering::Release);self.message="Cancellation requested; current Git operation may finish before cleanup".into();}
+            KeyCode::Esc=>{self.cancel.store(true,Ordering::Release);self.message="Cancellation requested; waiting for child termination and cleanup".into();}
             KeyCode::Char('?')=>self.help= !self.help,
             KeyCode::Char('r') if !self.busy=>{self.capture();}
             KeyCode::Char('v') if !self.busy=>{if let Some(plan)=self.plan.as_ref().map(copy_plan) {let flag=self.token();let _=self.tx.send(Job::Validate(self.revision,plan,flag));self.message="Validating captured units and aggregate reconstruction…".into();}}
@@ -800,7 +815,7 @@ fn draw(f: &mut Frame, app: &App) {
     } else {
         format!(
             "{}\n? help · g group · Space assign · v validate · p/c export · q quit",
-            safe(&app.message)
+            safe(&app.status_message())
         )
     };
     f.render_widget(

@@ -34,6 +34,7 @@ mod provenance_cli;
 mod reconcile;
 mod removal;
 mod tui;
+mod tui_process;
 mod untangle;
 mod untangle_evidence;
 mod untangle_export;
@@ -60,6 +61,18 @@ enum Commands {
     Provenance(provenance_cli::Options),
     /// Untangle a workspace by grouping and validating changes without modifying it
     Untangle(untangle::Options),
+    /// Internal process boundary for cancellable browser diff reads
+    #[command(name = "__tui-read-diff", hide = true)]
+    TuiReadDiff {
+        #[arg(long, require_equals = true)]
+        workspace: String,
+        #[arg(long, require_equals = true)]
+        path_hex: String,
+        #[arg(long, require_equals = true)]
+        previous_hex: Option<String>,
+        #[arg(long)]
+        include_untracked_content: bool,
+    },
     /// Open the interactive workspace browser
     Tui {
         /// Allow capture of untracked file content throughout this session
@@ -399,6 +412,19 @@ fn run(command: Option<Commands>) -> Result<()> {
         }) => changeset::show(&name, stat, json, include_untracked_content)?,
         Some(Commands::New { name, from }) => workspace::create(&name, &from)?,
         Some(Commands::List { json }) => workspace::list(json)?,
+        Some(Commands::TuiReadDiff {
+            workspace,
+            path_hex,
+            previous_hex,
+            include_untracked_content,
+        }) => {
+            tui_process::show_diff(
+                &workspace,
+                &path_hex,
+                previous_hex.as_deref(),
+                include_untracked_content,
+            )?;
+        }
         Some(Commands::Status { json }) => {
             let s = status()?;
             if json {

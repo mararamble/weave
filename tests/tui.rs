@@ -94,6 +94,9 @@ impl Terminal {
         Self::with_args(repo, spaces, &[])
     }
     fn with_args(repo: &Path, spaces: &Path, args: &[&str]) -> Self {
+        Self::with_env(repo, spaces, args, &[])
+    }
+    fn with_env(repo: &Path, spaces: &Path, args: &[&str], env: &[(&str, String)]) -> Self {
         let (mut master_fd, mut slave_fd) = (-1, -1);
         let mut size = libc::winsize {
             ws_row: 30,
@@ -135,6 +138,7 @@ impl Terminal {
         let child = common::isolate(&mut cmd)
             .current_dir(repo)
             .args(args)
+            .envs(env.iter().map(|(key, value)| (*key, value)))
             .env("HOME", home)
             .env("XDG_CONFIG_HOME", home)
             .env("WEAVE_WORKSPACE_DIR", spaces)
@@ -210,11 +214,19 @@ impl Terminal {
         self.master.write_all(keys).unwrap();
     }
     fn finish(&mut self) {
+        self.finish_with_success(true);
+    }
+    fn finish_with_success(&mut self, expected: bool) {
         let start = Instant::now();
         loop {
             self.read();
             if let Some(status) = self.child.try_wait().unwrap() {
-                assert!(status.success());
+                assert_eq!(
+                    status.success(),
+                    expected,
+                    "TUI exit {status}: {}",
+                    String::from_utf8_lossy(&self.seen)
+                );
                 break;
             }
             assert!(
@@ -837,4 +849,429 @@ fn failed_listing_refresh_clears_selection_before_review_or_integration() {
     assert_eq!(fs::read(&record).unwrap(), b"{broken");
     assert!(spaces.join("healthy/file").exists());
     assert!(spaces.join("damaged/file").exists());
+}
+
+// A fixture-owned Git shim and child, held until cancellation or explicit release.
+// The PID assertion distinguishes termination from ignoring an obsolete UI result.
+struct GitStall {
+    marker: PathBuf,
+    armed: PathBuf,
+    release: PathBuf,
+    env: Vec<(&'static str, String)>,
+}
+impl GitStall {
+    fn new(temp: &Path, argument: &str, fail: bool) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = temp.join("stall-bin");
+        fs::create_dir(&bin).unwrap();
+        let marker = temp.join("stall-pids.json");
+        let armed = temp.join("stall-armed");
+        let release = temp.join("stall-release");
+        let real = Command::new("which").arg("git").output().unwrap();
+        assert!(real.status.success());
+        let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
+        let shim = bin.join("git");
+        let mut script = r#"#!/usr/bin/env python3
+import os, sys, subprocess, time, json
+from pathlib import Path
+armed=Path(os.environ['WEV_STALL_ARMED'])
+release=Path(os.environ['WEV_STALL_RELEASE'])
+if armed.exists() and os.environ['WEV_STALL_ARGUMENT'] in sys.argv[1:]:
+    descendant=subprocess.Popen([sys.executable, '-c', 'import sys,time; from pathlib import Path; p=Path(sys.argv[1]);\nwhile not p.exists(): time.sleep(.02)', str(release)])
+    temporary=Path(os.environ.get('TMPDIR',os.environ['HOME']))
+    if 'weave-tui-read-' in str(temporary):
+        (temporary/'fixture-temporary-data').write_text('discard after cancellation')
+    data={'git':os.getpid(),'cli':os.getppid(),'group':os.getpgrp(),'descendant':descendant.pid,'temporary':str(temporary)}
+    marker=Path(os.environ['WEV_STALL_MARKER']); pending=marker.with_suffix('.pending')
+    pending.write_text(json.dumps(data)); pending.replace(marker)
+    while not release.exists(): time.sleep(.02)
+    descendant.wait()
+    if os.environ['WEV_STALL_FAIL']=='yes': sys.exit(9)
+os.execv(os.environ['WEV_REAL_GIT'],[os.environ['WEV_REAL_GIT'],*sys.argv[1:]])
+"#.to_owned();
+        for (name, value) in [
+            ("WEV_STALL_ARMED", armed.to_str().unwrap()),
+            ("WEV_STALL_RELEASE", release.to_str().unwrap()),
+            ("WEV_STALL_MARKER", marker.to_str().unwrap()),
+            ("WEV_STALL_ARGUMENT", argument),
+            ("WEV_STALL_FAIL", if fail { "yes" } else { "no" }),
+            ("WEV_REAL_GIT", real.as_str()),
+        ] {
+            script = script.replace(
+                &format!("os.environ['{name}']"),
+                &serde_json::to_string(value).unwrap(),
+            );
+        }
+        fs::write(&shim, script).unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        Self {
+            marker: marker.clone(),
+            armed: armed.clone(),
+            release: release.clone(),
+            env: vec![
+                (
+                    "PATH",
+                    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+                ),
+                ("WEV_STALL_MARKER", marker.to_str().unwrap().into()),
+                ("WEV_STALL_ARMED", armed.to_str().unwrap().into()),
+                ("WEV_STALL_RELEASE", release.to_str().unwrap().into()),
+                ("WEV_STALL_ARGUMENT", argument.into()),
+                ("WEV_STALL_FAIL", if fail { "yes" } else { "no" }.into()),
+                ("WEV_REAL_GIT", real),
+            ],
+        }
+    }
+    fn arm(&self) {
+        fs::write(&self.armed, "armed").unwrap();
+    }
+    fn wait(&self, terminal: &mut Terminal) -> serde_json::Value {
+        let start = Instant::now();
+        while !self.marker.exists() {
+            terminal.read();
+            assert!(terminal.child.try_wait().unwrap().is_none());
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "Stall not reached: {}",
+                terminal.screen_text()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        serde_json::from_slice(&fs::read(&self.marker).unwrap()).unwrap()
+    }
+    fn release(&self) {
+        fs::write(&self.release, "released").unwrap();
+    }
+}
+impl Drop for GitStall {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.release, "released");
+    }
+}
+fn process_executing(pid: i32) -> bool {
+    // PID values are recorded by our disposable fixture, never taken from user data.
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(status) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // An orphan can briefly remain a zombie until the host init reaps it.
+        // It is terminated, cannot execute, and cannot write fixture data.
+        if status
+            .rsplit_once(") ")
+            .is_some_and(|(_, tail)| tail.starts_with('Z'))
+        {
+            return false;
+        }
+    }
+    true
+}
+fn assert_read_processes_stopped(pids: &serde_json::Value) {
+    let start = Instant::now();
+    loop {
+        let running = ["cli", "git", "descendant"]
+            .into_iter()
+            .filter(|key| process_executing(pids[key].as_i64().unwrap() as i32))
+            .collect::<Vec<_>>();
+        if running.is_empty() {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "Processes still executing after read cancel: {running:?}; {pids}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The browser's direct CLI child must be reaped, not merely a zombie.
+    let result = unsafe { libc::kill(pids["cli"].as_i64().unwrap() as i32, 0) };
+    assert_eq!(result, -1, "Read CLI child was not reaped");
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+}
+#[test]
+fn stalled_browser_reads_cancel_children_and_temporary_data_without_source_writes() {
+    for (action, argument) in [
+        (b'r', "status"),
+        (b's', "status"),
+        (b'\r', "diff"),
+        (b'p', "merge-tree"),
+        (b'o', "diff"),
+        (b'c', "status"),
+        (b'D', "status"),
+    ] {
+        let (temp, repo, spaces) = fixture();
+        let name = if action == b'D' { "--yes" } else { "task" };
+        assert!(
+            weave(&repo, &spaces, &["new", "--from", "HEAD", "--", name])
+                .status
+                .success()
+        );
+        fs::write(spaces.join(name).join("file"), "changed\n").unwrap();
+        let before = source_state(&repo, &spaces, &[name]);
+        let stall = GitStall::new(temp.path(), argument, false);
+        let mut terminal = Terminal::with_env(&repo, &spaces, &["tui"], &stall.env);
+        terminal.wait_for("1 workspaces; Enter opens files");
+        stall.arm();
+        terminal.send(&[action]);
+        let pids = stall.wait(&mut terminal);
+        assert_eq!(pids["group"], pids["cli"]);
+        assert_ne!(pids["group"].as_u64().unwrap(), terminal.child.id() as u64);
+        terminal.send(b"\x1b");
+        terminal.wait_for("Read cancelled; child process stopped and reaped");
+        assert_read_processes_stopped(&pids);
+        assert!(
+            !Path::new(pids["temporary"].as_str().unwrap()).exists(),
+            "Temporary read root leaked"
+        );
+        assert_eq!(source_state(&repo, &spaces, &[name]), before);
+        terminal.send(b"\x03");
+        terminal.finish();
+    }
+}
+#[test]
+fn stalled_file_diff_and_quit_reap_their_read_children() {
+    for quit in [false, true] {
+        let (temp, repo, spaces) = fixture();
+        assert!(
+            weave(&repo, &spaces, &["new", "task", "--from", "HEAD"])
+                .status
+                .success()
+        );
+        fs::write(spaces.join("task/file"), "changed\n").unwrap();
+        let before = source_state(&repo, &spaces, &["task"]);
+        let stall = GitStall::new(temp.path(), "--no-renames", false);
+        let mut terminal = Terminal::with_env(&repo, &spaces, &["tui"], &stall.env);
+        terminal.wait_for("1 workspaces; Enter opens files");
+        terminal.send(b"\r");
+        terminal.wait_for("Enter opens diff");
+        stall.arm();
+        terminal.send(b"\r");
+        let pids = stall.wait(&mut terminal);
+        terminal.send(if quit { b"\x03" } else { b"\x1b" });
+        if !quit {
+            terminal.wait_for("Read cancelled; child process stopped and reaped");
+            terminal.send(b"\x03");
+        }
+        terminal.finish();
+        assert_read_processes_stopped(&pids);
+        assert_eq!(source_state(&repo, &spaces, &["task"]), before);
+    }
+}
+#[test]
+fn mutation_quit_waits_for_success_or_failure_and_restores_terminal() {
+    for fail in [false, true] {
+        let (temp, repo, spaces) = fixture();
+        let index = fs::read(repo.join(".git/index")).unwrap();
+        let stall = GitStall::new(temp.path(), "add", fail);
+        let mut terminal = Terminal::with_env(&repo, &spaces, &["tui"], &stall.env);
+        terminal.wait_for("0 workspaces; Enter opens files");
+        stall.arm();
+        terminal.send(b"n");
+        terminal.wait_for("New workspace name:");
+        terminal.send(b"task\r");
+        terminal.wait_for("from ref:");
+        terminal.send(b"\r");
+        terminal.wait_for("y confirm");
+        terminal.send(b"y");
+        let pids = stall.wait(&mut terminal);
+        terminal.send(b"q");
+        terminal.wait_for("Finishing operation, will exit when done");
+        terminal.send(b"\x03\x1b");
+        assert!(terminal.child.try_wait().unwrap().is_none());
+        assert!(process_executing(pids["cli"].as_i64().unwrap() as i32));
+        assert!(process_executing(pids["git"].as_i64().unwrap() as i32));
+        let record = repo.join(".git/weave/task.json");
+        let pending: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+        assert_eq!(pending["state"], "pending");
+        stall.release();
+        terminal.finish_with_success(!fail);
+        let after: serde_json::Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+        assert_eq!(after["state"], if fail { "pending" } else { "ready" });
+        assert_eq!(spaces.join("task").exists(), !fail);
+        assert_eq!(fs::read(repo.join(".git/index")).unwrap(), index);
+        assert_eq!(fs::read(repo.join("file")).unwrap(), b"original\n");
+        if fail {
+            assert!(
+                String::from_utf8_lossy(&terminal.seen).contains("Operation failed before exit")
+            );
+        }
+    }
+}
+
+#[test]
+fn vineweaver_capture_validation_and_export_cancel_owned_git_children() {
+    for phase in ["capture", "validate", "export"] {
+        let (temp, repo, spaces) = fixture();
+        assert!(
+            weave(&repo, &spaces, &["new", "task", "--from", "HEAD"])
+                .status
+                .success()
+        );
+        fs::write(spaces.join("task/file"), "changed\n").unwrap();
+        let before = source_state(&repo, &spaces, &["task"]);
+        let argument = match phase {
+            "capture" => "diff",
+            "validate" => "read-tree",
+            _ => "bundle",
+        };
+        let stall = GitStall::new(temp.path(), argument, false);
+        if phase == "capture" {
+            stall.arm();
+        }
+        let mut terminal = Terminal::with_env(
+            &repo,
+            &spaces,
+            &["untangle", "task", "--review"],
+            &stall.env,
+        );
+        let destination = temp.path().join("cancelled-export");
+        if phase != "capture" {
+            terminal.wait_for("UNASSIGNED");
+            terminal.send(b"gchange\r ");
+            if phase == "export" {
+                terminal.send(b"v");
+                terminal.wait_for("Validation ready");
+                stall.arm();
+                terminal.send(format!("c{}\rexport\r", destination.display()).as_bytes());
+            } else {
+                stall.arm();
+                terminal.send(b"v");
+            }
+        }
+        let pids = stall.wait(&mut terminal);
+        assert_eq!(pids["group"], pids["git"]);
+        assert_eq!(pids["cli"].as_u64().unwrap(), terminal.child.id() as u64);
+        terminal.send(b"\x1b");
+        terminal.wait_for("Read cancelled; child process terminated and reaped");
+        for name in ["git", "descendant"] {
+            let pid = pids[name].as_i64().unwrap() as i32;
+            let start = Instant::now();
+            while process_executing(pid) {
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "{phase}: {name} still executing"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        assert_eq!(
+            unsafe { libc::kill(pids["git"].as_i64().unwrap() as i32, 0) },
+            -1
+        );
+        assert!(!destination.exists());
+        assert!(!fs::read_dir(temp.path()).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".vineweaver-export-")
+        }));
+        fs::rename(&stall.armed, stall.armed.with_extension("disarmed")).unwrap();
+        if phase == "capture" {
+            terminal.send(b"r");
+            terminal.wait_for("UNASSIGNED");
+        } else {
+            terminal.send(b"v");
+            terminal.wait_for("Validation ready");
+            if phase == "export" {
+                let recovered = temp.path().join("recovered-export");
+                terminal.send(format!("c{}\rexport\r", recovered.display()).as_bytes());
+                terminal.wait_for("Export published");
+                assert!(recovered.join("commits.bundle").exists());
+            }
+        }
+        terminal.send(b"q");
+        terminal.finish();
+        assert_eq!(source_state(&repo, &spaces, &["task"]), before);
+    }
+}
+
+#[test]
+fn removal_quit_finishes_confirmed_deletion_and_restores_terminal() {
+    let (temp, repo, spaces) = fixture();
+    assert!(
+        weave(&repo, &spaces, &["new", "task", "--from", "HEAD"])
+            .status
+            .success()
+    );
+    let before = source_state(&repo, &spaces, &["task"]);
+    let stall = GitStall::new(temp.path(), "remove", false);
+    let mut terminal = Terminal::with_env(&repo, &spaces, &["tui"], &stall.env);
+    terminal.wait_for("1 workspaces; Enter opens files");
+    stall.arm();
+    terminal.send(b"d");
+    terminal.wait_for("branch is retained");
+    terminal.send(b"y");
+    let pids = stall.wait(&mut terminal);
+    terminal.send(b"\x03");
+    terminal.wait_for("Finishing operation, will exit when done");
+    assert!(spaces.join("task").exists());
+    assert!(process_executing(pids["git"].as_i64().unwrap() as i32));
+    stall.release();
+    terminal.finish();
+    assert!(!spaces.join("task").exists());
+    assert!(!repo.join(".git/weave/task.json").exists());
+    assert_eq!(source_state(&repo, &spaces, &[])[0..3], before[0..3]);
+}
+
+#[test]
+fn integration_validation_child_survives_quit_until_completion_then_exits() {
+    use std::os::unix::fs::PermissionsExt;
+    let (temp, repo, spaces) = fixture();
+    assert!(
+        weave(&repo, &spaces, &["new", "task", "--from", "HEAD"])
+            .status
+            .success()
+    );
+    fs::write(spaces.join("task/file"), "changed\n").unwrap();
+    let before = source_state(&repo, &spaces, &["task"]);
+    let marker = temp.path().join("validation-pid");
+    let release = temp.path().join("validation-release");
+    let validator = temp.path().join("validate");
+    let script = format!(
+        "#!/bin/sh\necho $$ > '{}'\nwhile [ ! -f '{}' ]; do /bin/sleep 0.02; done\n",
+        marker.display(),
+        release.display()
+    );
+    fs::write(&validator, script).unwrap();
+    fs::set_permissions(&validator, fs::Permissions::from_mode(0o755)).unwrap();
+    // Release the fixture even if a later assertion fails.
+    let release_guard = GitStall {
+        marker: marker.clone(),
+        armed: temp.path().join("unused"),
+        release: release.clone(),
+        env: vec![],
+    };
+    let mut terminal = Terminal::new(&repo, &spaces);
+    terminal.wait_for("1 workspaces; Enter opens files");
+    terminal.send(b"i");
+    terminal.wait_for("Integration branch:");
+    terminal.send(b"review/after-quit\r");
+    terminal.wait_for("Next argument:");
+    terminal.send(format!("{}\r\r", validator.display()).as_bytes());
+    terminal.wait_for("y confirm");
+    terminal.send(b"y");
+    let start = Instant::now();
+    while !marker.exists() {
+        terminal.read();
+        assert!(start.elapsed() < Duration::from_secs(15));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pid = fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse::<i32>()
+        .unwrap();
+    terminal.send(b"\x03");
+    terminal.wait_for("Finishing operation, will exit when done");
+    assert!(process_executing(pid));
+    assert!(terminal.child.try_wait().unwrap().is_none());
+    release_guard.release();
+    terminal.finish();
+    assert!(!process_executing(pid));
+    let after = source_state(&repo, &spaces, &["task"]);
+    assert_eq!(after[1..], before[1..]);
+    assert!(String::from_utf8_lossy(&after[0]).contains("refs/heads/review/after-quit"));
 }
