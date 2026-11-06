@@ -680,6 +680,15 @@ impl App {
                             format!("{} workspaces; Enter opens files", self.workspaces.len());
                     }
                     Err(e) => {
+                        // A failed refresh is not a complete listing. Invalidate
+                        // cached selection so reviews cannot use stale rows.
+                        self.workspaces.clear();
+                        self.marked.clear();
+                        self.files.clear();
+                        self.files_owner = None;
+                        self.selected = 0;
+                        self.file_selected = 0;
+                        self.diff_file = None;
                         self.focus = Focus::Review;
                         self.review_scroll = 0;
                         self.review = format!("Workspace listing failed:\n{e:#}");
@@ -1484,6 +1493,29 @@ mod tests {
         app.receive();
         assert_eq!(app.name().as_deref(), Some("b"));
         assert_eq!(app.marked, ["b"]);
+    }
+    #[test]
+    fn failed_listing_invalidates_cached_rows_marks_and_files() {
+        let mut app = App::new();
+        app.workspaces = vec![serde_json::json!({"name":"old", "dirty":false})];
+        app.marked.push("old".into());
+        app.files_owner = Some("old".into());
+        app.files = make_files(
+            &serde_json::json!({"aggregate_changes":[{"path":"file","path_hex":"66696c65"}]}),
+        );
+        app.tx
+            .send(Message::List(
+                0,
+                Err(anyhow::anyhow!("Cannot inspect damaged workspace")),
+            ))
+            .unwrap();
+        app.receive();
+        assert!(app.selected_names().is_empty());
+        assert!(app.name().is_none());
+        assert!(app.files.is_empty());
+        assert!(app.files_owner.is_none());
+        assert!(app.focus == Focus::Review);
+        assert!(app.review.contains("Cannot inspect damaged workspace"));
     }
     #[test]
     fn files_refresh_preserves_selected_path_and_errors_remain_readable() {

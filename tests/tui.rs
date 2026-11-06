@@ -806,3 +806,35 @@ fn flag_like_names_keyboard_ordered_integration_with_and_without_validation() {
         assert!(!tree.lines().any(|p| p == "new"));
     }
 }
+
+#[test]
+fn failed_listing_refresh_clears_selection_before_review_or_integration() {
+    let (_temp, repo, spaces) = fixture();
+    for name in ["healthy", "damaged"] {
+        assert!(
+            weave(&repo, &spaces, &["new", name, "--from", "HEAD"])
+                .status
+                .success()
+        );
+    }
+    let mut terminal = Terminal::new(&repo, &spaces);
+    terminal.wait_for("2 workspaces; Enter opens files");
+    terminal.send(b" ");
+    let record = repo.join(".git/weave/damaged.json");
+    fs::write(&record, "{broken").unwrap();
+    terminal.send(b"r");
+    terminal.wait_for("Workspace listing failed; inspect review");
+    terminal.send(b"p");
+    terminal.wait_for("No workspaces to review");
+    terminal.send(b"i");
+    terminal.wait_for("Integration branch:");
+    terminal.send(b"must-not-create\r");
+    terminal.wait_for("Validation argv:");
+    terminal.send(b"\r");
+    terminal.wait_for("No workspaces to integrate");
+    terminal.send(b"qq");
+    terminal.finish();
+    assert_eq!(fs::read(&record).unwrap(), b"{broken");
+    assert!(spaces.join("healthy/file").exists());
+    assert!(spaces.join("damaged/file").exists());
+}
