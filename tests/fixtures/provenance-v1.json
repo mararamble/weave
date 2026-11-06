@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "event": {
+    "event_id": "event-1",
+    "stream_id": "stream-1",
+    "sequence": 10,
+    "worktree_id": {"state": "known", "value": "worktree-1"},
+    "task_id": {"state": "known", "value": "task-1"},
+    "task_owner_agent_id": {"state": "known", "value": "task-owner-not-edit-author"},
+    "base_commit": {"state": "missing", "reason": "unavailable"},
+    "path_hex": "7372632fff0a2e7273",
+    "previous_path_hex": {"state": "missing", "reason": "not_applicable"},
+    "operation": "modify",
+    "before": {"state": "hash", "hash": {"algorithm": "opaque-store-algorithm", "digest": "before-content-id"}},
+    "after": {"state": "hash", "hash": {"algorithm": "opaque-store-algorithm", "digest": "after-content-id"}},
+    "snapshot_ref": {"state": "missing", "reason": "suppressed"},
+    "patch_ref": {"state": "missing", "reason": "not_observed"},
+    "source": {"kind": "worktree_baseline"},
+    "timestamp": {"state": "known", "value": {"unix_seconds": 1793721600, "nanoseconds": 123}},
+    "authorship": {"confidence": "worktree_only"}
+  }
+}

@@ -18,6 +18,78 @@ struct Terminal {
     seen: Vec<u8>,
 }
 impl Terminal {
+    // Reconstruct cursor-addressed output: Ratatui can emit only changed letters,
+    // so stripping CSI sequences alone loses words across successive frames.
+    fn screen_text(&self) -> String {
+        let mut screen = vec![vec![' '; 140]; 30];
+        let (mut row, mut col) = (0usize, 0usize);
+        let mut chars = String::from_utf8_lossy(&self.seen)
+            .chars()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\x1b' if chars.peek() == Some(&'[') => {
+                    chars.next();
+                    let mut params = String::new();
+                    let mut command = 'm';
+                    for part in chars.by_ref() {
+                        if ('@'..='~').contains(&part) {
+                            command = part;
+                            break;
+                        }
+                        params.push(part);
+                    }
+                    let values: Vec<usize> =
+                        params.split(';').map(|v| v.parse().unwrap_or(0)).collect();
+                    let first = values.first().copied().unwrap_or(0);
+                    let count = first.max(1);
+                    match command {
+                        'H' | 'f' => {
+                            row = count.saturating_sub(1).min(29);
+                            col = values
+                                .get(1)
+                                .copied()
+                                .unwrap_or(1)
+                                .max(1)
+                                .saturating_sub(1)
+                                .min(139);
+                        }
+                        'A' => row = row.saturating_sub(count),
+                        'B' => row = (row + count).min(29),
+                        'C' => col = (col + count).min(139),
+                        'D' => col = col.saturating_sub(count),
+                        'G' => col = count.saturating_sub(1).min(139),
+                        'J' if first == 2 || first == 3 => {
+                            screen.iter_mut().for_each(|r| r.fill(' '))
+                        }
+                        'K' => match first {
+                            1 => screen[row][..=col].fill(' '),
+                            2 => screen[row].fill(' '),
+                            _ => screen[row][col..].fill(' '),
+                        },
+                        _ => {}
+                    }
+                }
+                '\x1b' => {
+                    chars.next();
+                }
+                '\r' => col = 0,
+                '\n' => row = (row + 1).min(29),
+                c if !c.is_control() => {
+                    screen[row][col] = c;
+                    col = (col + 1).min(139);
+                }
+                _ => {}
+            }
+        }
+        screen
+            .into_iter()
+            .flatten()
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    }
     fn new(repo: &Path, spaces: &Path) -> Self {
         Self::with_args(repo, spaces, &[])
     }
@@ -112,12 +184,13 @@ impl Terminal {
                     text.push(c);
                 }
             }
-            if text.contains(
-                &needle
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .collect::<String>(),
-            ) {
+            let needle_text = needle
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>();
+            if text.contains(&needle_text)
+                || (!self.output.is_empty() && self.screen_text().contains(&needle_text))
+            {
                 self.output.clear();
                 return;
             }
@@ -127,7 +200,8 @@ impl Terminal {
             );
             assert!(
                 start.elapsed() < Duration::from_secs(20),
-                "TUI did not show {needle}: {text}"
+                "TUI did not show {needle}: {text}; screen: {}",
+                self.screen_text()
             );
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -463,5 +537,202 @@ fn both_interactive_interfaces_render_escape_fixture_safely() {
         terminal.finish();
         assert!(!terminal.seen.windows(INJECTED.len()).any(|w| w == INJECTED));
         assert_eq!(fs::read(spaces.join("task/file")).unwrap(), content);
+    }
+}
+
+fn source_state(repo: &Path, spaces: &Path, names: &[&str]) -> Vec<Vec<u8>> {
+    use common::FixtureOutput;
+    let git = |dir: &Path, args: &[&str]| {
+        let out = common::isolate(&mut Command::new("git"))
+            .current_dir(dir)
+            .args(args)
+            .fixture_output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    };
+    let mut state = vec![
+        git(repo, &["show-ref"]),
+        fs::read(repo.join("file")).unwrap(),
+        fs::read(repo.join(".git/index")).unwrap(),
+    ];
+    for name in names {
+        let path = spaces.join(name);
+        state.push(fs::read(path.join("file")).unwrap());
+        if path.join("new").exists() {
+            state.push(fs::read(path.join("new")).unwrap());
+        }
+        let raw = git(
+            &path,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+        );
+        state.push(fs::read(String::from_utf8(raw).unwrap().trim()).unwrap());
+        state.push(fs::read(path.join(".git")).unwrap());
+        state.push(fs::read(repo.join(".git/weave").join(format!("{name}.json"))).unwrap());
+    }
+    state
+}
+
+#[test]
+fn flag_like_names_keyboard_create_browse_review_preview_cancel_and_remove() {
+    for name in ["-odd", "--help", "--yes", "-", "--"] {
+        eprintln!("keyboard name: {name}");
+        let (_temp, repo, spaces) = fixture();
+        let before_create = source_state(&repo, &spaces, &[]);
+        let mut terminal =
+            Terminal::with_args(&repo, &spaces, &["tui", "--include-untracked-content"]);
+        terminal.wait_for("0 workspaces; Enter opens files");
+        // Palette creation, cancellation, then actual creation through the shortcut.
+        terminal.send(b":new\r");
+        terminal.wait_for("New workspace name:");
+        terminal.send(format!("{name}\r").as_bytes());
+        terminal.wait_for("from ref:");
+        terminal.send(b"\r");
+        terminal.wait_for("y confirm");
+        terminal.send(b"\x1b");
+        terminal.wait_for("? help");
+        assert_eq!(before_create, source_state(&repo, &spaces, &[]));
+        assert!(!spaces.join(name).exists());
+        terminal.send(b"n");
+        terminal.wait_for("New workspace name:");
+        terminal.send(format!("{name}\r").as_bytes());
+        terminal.wait_for("from ref:");
+        terminal.send(b"\r");
+        terminal.wait_for("y confirm");
+        terminal.send(b"y");
+        terminal.wait_for("1 workspaces; Enter opens files");
+        let path = spaces.join(name);
+        fs::write(path.join("file"), "tracked hyphen content\n").unwrap();
+        fs::write(path.join("new"), "untracked hyphen content\n").unwrap();
+        let before_review = source_state(&repo, &spaces, &[name]);
+        terminal.send(b"q\r");
+        terminal.wait_for("Enter opens diff");
+        terminal.send(b"\r");
+        terminal.wait_for("tracked hyphen content");
+        terminal.send(b"q\r");
+        terminal.wait_for("Enter opens diff");
+        terminal.send(b"j\r");
+        terminal.wait_for("untracked hyphen content");
+        terminal.send(b"q");
+        terminal.send(b"t");
+        terminal.wait_for("Diff statistics complete");
+        terminal.send(b"J");
+        terminal.wait_for("Inspection complete");
+        terminal.send(b"w");
+        terminal.wait_for("Selected workspace details");
+        terminal.send(b":preview\r");
+        terminal.wait_for("Integration preview: clean");
+        terminal.send(b":overlaps\r");
+        terminal.wait_for("Overlap observations");
+        terminal.send(b"u");
+        terminal.wait_for("UNASSIGNED");
+        terminal.send(b"q");
+        terminal.wait_for("Workspaces");
+        // Both palette and shortcut removal must retain dirty/uncertain checks.
+        terminal.send(b":removal-preview\r");
+        terminal.wait_for("Removal preview failed");
+        terminal.send(b":remove\r");
+        terminal.wait_for("branch is retained");
+        terminal.send(b"y");
+        terminal.wait_for("Operation failed");
+        assert_eq!(before_review, source_state(&repo, &spaces, &[name]));
+
+        common::git(&path, &["add", "file", "new"]);
+        common::git(&path, &["commit", "-m", "save fixture changes"]);
+        let before_remove = source_state(&repo, &spaces, &[name]);
+        terminal.send(b"D");
+        terminal.wait_for("Preview only; no files removed");
+        terminal.send(b"d");
+        terminal.wait_for("branch is retained");
+        terminal.send(b"n");
+        terminal.wait_for("? help");
+        assert_eq!(before_remove, source_state(&repo, &spaces, &[name]));
+        terminal.send(b"d");
+        terminal.wait_for("branch is retained");
+        terminal.send(b"y");
+        terminal.wait_for("0 workspaces; Enter opens files");
+        assert!(!path.exists());
+        assert_eq!(before_remove[0], source_state(&repo, &spaces, &[])[0]);
+        terminal.send(b"qq");
+        terminal.finish();
+    }
+}
+
+#[test]
+fn flag_like_names_keyboard_ordered_integration_with_and_without_validation() {
+    let (_temp, repo, spaces) = fixture();
+    for name in ["-odd", "ordinary"] {
+        assert!(
+            weave(&repo, &spaces, &["new", "--from", "HEAD", "--", name])
+                .status
+                .success()
+        );
+        fs::write(spaces.join(name).join("new"), format!("{name}\n")).unwrap();
+    }
+    // Avoid a same-path add/add conflict so order can be inspected in the result.
+    fs::rename(
+        spaces.join("ordinary/new"),
+        spaces.join("ordinary/contribution"),
+    )
+    .unwrap();
+    let before = source_state(&repo, &spaces, &["-odd", "ordinary"]);
+    let mut terminal = Terminal::with_args(&repo, &spaces, &["tui", "--include-untracked-content"]);
+    terminal.wait_for("2 workspaces; Enter opens files");
+    terminal.send(b"j k "); // ordinary, then -odd
+    terminal.send(b"p");
+    terminal.wait_for("Integration preview: clean");
+    terminal.send(b"o");
+    terminal.wait_for("Overlap observations");
+    terminal.send(b":integrate\r");
+    terminal.wait_for("Integration branch:");
+    terminal.send(b"review/cancelled\r");
+    terminal.wait_for("Next argument:");
+    terminal.send(b"\r");
+    terminal.wait_for("y confirm");
+    terminal.send(b"n");
+    terminal.wait_for("? help");
+    assert_eq!(before, source_state(&repo, &spaces, &["-odd", "ordinary"]));
+
+    terminal.send(b"i");
+    terminal.wait_for("Integration branch:");
+    terminal.send(b"review/unchecked\r");
+    terminal.wait_for("Next argument:");
+    terminal.send(b"\r");
+    terminal.wait_for("y confirm");
+    terminal.send(b"y");
+    terminal.wait_for("Created integration branch review/unchecked");
+    let after_unchecked = source_state(&repo, &spaces, &["-odd", "ordinary"]);
+    assert_eq!(before[1..], after_unchecked[1..]);
+
+    terminal.send(b"i");
+    terminal.wait_for("Integration branch:");
+    terminal.send(b"review/validated\r");
+    terminal.wait_for("Next argument:");
+    terminal.send(b"sh\r-c\rtest \"$1\" = --help && test \"$2\" = --yes && test \"$3\" = -odd && test -z \"$4\"\rvalidation\r--help\r--yes\r-odd\r");
+    terminal.send(b"\x1b[12~"); // F2 adds an empty validation argument.
+    terminal.send(b"\r");
+    terminal.wait_for("y confirm");
+    terminal.send(b"y");
+    terminal.wait_for("Created integration branch review/validated");
+    let after_validated = source_state(&repo, &spaces, &["-odd", "ordinary"]);
+    assert_eq!(before[1..], after_validated[1..]);
+    terminal.send(b"qq");
+    terminal.finish();
+
+    use common::FixtureOutput;
+    for branch in ["review/unchecked", "review/validated"] {
+        let out = common::isolate(&mut Command::new("git"))
+            .current_dir(&repo)
+            .args(["ls-tree", "--name-only", &format!("{branch}^1")])
+            .fixture_output()
+            .unwrap();
+        assert!(out.status.success());
+        let tree = String::from_utf8(out.stdout).unwrap();
+        assert!(tree.lines().any(|p| p == "contribution"));
+        assert!(!tree.lines().any(|p| p == "new"));
     }
 }

@@ -118,6 +118,11 @@ This installs the `weave` executable into Cargo's binary directory, normally `~/
 
 Make sure that directory is available on your `PATH`.
 
+Workspace names may begin with hyphens. Put CLI options before `-- NAME`, for
+example `weave new --from main -- -odd` or `weave remove --dry-run -- --yes`.
+Integration uses repeatable `--workspace=NAME` instead, preserving `--` for its
+validation command. See [workspace name syntax and TUI coverage](docs/workspace-names.md).
+
 ### Terminal interface
 
 Run `weave` (or `weave tui`) inside a Git worktree on an interactive terminal. To opt in to untracked content capture for the session, run `weave tui --include-untracked-content`; this also applies to planning, integration and Vineweaver review. Navigate with `j`/`k` or the arrow keys, change panes with `h`/`l` or Tab, and press `Enter` to open a workspace or file. `/` filters workspaces, Space marks them in the order used for planning and integration, `o` reviews overlaps, `p` previews integration, and `u` opens Vineweaver. `s` shows repository status, `w` shows the selected workspace details, and `c` reconciles worktrees. `t` shows diff statistics, `J` shows diff JSON, and `[`/`]` page through large captured patches or untracked content. `n` creates a workspace, `D` previews removal, `d` removes the selected workspace, and `i` creates an integration branch. Integration accepts an optional validation executable and its arguments, entered one at a time; these run directly without a shell; F2 adds an empty argument. These mutations require confirmation; Esc cancels. `:` opens the action palette, `?` shows shortcuts, `r` refreshes, and `q` returns to the workspace pane or exits. Integration uses workspaces in marking order, or all workspaces in listing order when none are marked. On narrow terminals the active pane fills the screen.
@@ -702,12 +707,14 @@ Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and
 |---|---|---|
 | 01 | Repository discovery | Implemented |
 | 02 | Managed worktrees, reconciliation and confirmed removal (new workspaces default outside Git metadata) | Implemented, verification pending: safety review; hosted CI passed for cbba825 |
+| WEV-41 | Leading-hyphen workspace names | CLI/TUI implementation and regression coverage; Linux execution remains an open verification gate |
 | 03 | Diff collection and overlap detection | Implemented; untracked content capture is opt-in |
 | 04 | Non-destructive integration planning and review branches | Implemented; untracked content requires opt-in; validation uses a minimal environment but is not sandboxed |
 | 05 | Ratatui terminal interface | Implemented; local and SSH launch/create/exit smoke tests passed |
 | 05c | TUI-first parity and keyboard workflows (WEV-36) | Implemented: ordered review and integration, confirmed mutations, paged diffs, keyboard palette, narrow layouts, local and SSH smoke tests; limits documented |
 | 06 | Vineweaver engine | Implemented: snapshot-scoped hunk/whole-file assignment and isolated validation; untracked content requires opt-in |
 | 06b | Vineweaver review and Untangle export (WEV-18) | Implemented, SSH verification pending: local TUI review, ordering/undo, verified patch and independent-commit bundle exports |
+| 06c | Optional provenance (WEV-19) | Schema foundation only: [event and evidence contract](docs/provenance.md); capture, storage, concurrency and replay remain pending; WEV-19 is incomplete |
 | 07 | SSH remote linking | Planned |
 | 08 | Remote uncommitted snapshots | Planned |
 | 09 | Distributed integration | Planned |

@@ -68,8 +68,12 @@ enum Commands {
         branch: String,
         #[arg(long)]
         json: bool,
-        #[arg(required = true)]
+        #[arg(required_unless_present = "workspaces", conflicts_with = "workspaces")]
         names: Vec<String>,
+        /// Ordered workspace name (repeatable); use = for flag-like names
+        #[arg(long = "workspace", value_name = "NAME", require_equals = true,
+            value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        workspaces: Vec<String>,
         /// Pass a named parent environment variable to validation (repeatable)
         #[arg(long = "pass-env")]
         pass_env: Vec<String>,
@@ -358,11 +362,16 @@ fn run(command: Option<Commands>) -> Result<()> {
             branch,
             json,
             names,
+            workspaces,
             validation,
             pass_env,
             include_untracked_content,
         }) => integration::integrate(
-            &names,
+            &if workspaces.is_empty() {
+                names
+            } else {
+                workspaces
+            },
             &branch,
             &validation,
             &pass_env,

@@ -203,7 +203,7 @@ impl App {
     fn removal_preview(&mut self) {
         let Some(name) = self.name() else { return };
         self.text_command(
-            vec!["remove".into(), name, "--dry-run".into()],
+            vec!["remove".into(), "--dry-run".into(), "--".into(), name],
             "Removal preview",
         );
     }
@@ -284,7 +284,7 @@ impl App {
         if self.include_untracked_content {
             args.push("--include-untracked-content".into());
         }
-        args.extend(names);
+        args.extend(names.into_iter().map(|name| format!("--workspace={name}")));
         if !validation.is_empty() {
             args.push("--".into());
             args.extend(validation);
@@ -346,7 +346,7 @@ impl App {
                                 safe(&name),
                                 safe(&base)
                             ),
-                            args: vec!["new".into(), name, "--from".into(), base],
+                            args: vec!["new".into(), "--from".into(), base, "--".into(), name],
                         }),
                         Modal::Palette(action) => match action.trim() {
                             "new" => Some(Modal::NewName(String::new())),
@@ -355,7 +355,7 @@ impl App {
                                     "Remove workspace {}? Its branch is retained.",
                                     safe(&name)
                                 ),
-                                args: vec!["remove".into(), name, "--yes".into()],
+                                args: vec!["remove".into(), "--yes".into(), "--".into(), name],
                             }),
                             "integrate" => Some(Modal::IntegrateBranch(String::new())),
                             "removal-preview" => {
@@ -412,10 +412,11 @@ impl App {
                 self.file_selected = 0;
             }
             self.files_owner = Some(name.clone());
-            let mut args = vec!["diff".into(), name, "--json".into()];
+            let mut args = vec!["diff".into(), "--json".into()];
             if self.include_untracked_content {
                 args.push("--include-untracked-content".into());
             }
+            args.extend(["--".into(), name]);
             self.start(args, 1);
         }
     }
@@ -447,6 +448,7 @@ impl App {
         if plan && self.include_untracked_content {
             args.push("--include-untracked-content".into());
         }
+        args.push("--".into());
         args.append(&mut names);
         self.focus = Focus::Review;
         self.diff_file = None;
@@ -1015,7 +1017,7 @@ pub(crate) fn run(include_untracked_content: bool) -> Result<()> {
                                     "Remove workspace {}? Its branch is retained.",
                                     safe(&name)
                                 ),
-                                args: vec!["remove".into(), name, "--yes".into()],
+                                args: vec!["remove".into(), "--yes".into(), "--".into(), name],
                             });
                         }
                     }
@@ -1024,10 +1026,11 @@ pub(crate) fn run(include_untracked_content: bool) -> Result<()> {
                         if let Some(name) = app.name() {
                             app.text_command(
                                 {
-                                    let mut args = vec!["diff".into(), name, "--stat".into()];
+                                    let mut args = vec!["diff".into(), "--stat".into()];
                                     if app.include_untracked_content {
                                         args.push("--include-untracked-content".into());
                                     }
+                                    args.extend(["--".into(), name]);
                                     args
                                 },
                                 "Diff statistics",
@@ -1036,10 +1039,11 @@ pub(crate) fn run(include_untracked_content: bool) -> Result<()> {
                     }
                     KeyCode::Char('J') => {
                         if let Some(name) = app.name() {
-                            let mut args = vec!["diff".into(), name, "--json".into()];
+                            let mut args = vec!["diff".into(), "--json".into()];
                             if app.include_untracked_content {
                                 args.push("--include-untracked-content".into());
                             }
+                            args.extend(["--".into(), name]);
                             app.start(args, 3);
                         }
                     }
@@ -1366,7 +1370,7 @@ mod tests {
         app.modal_key(KeyCode::F(2));
         app.modal_key(KeyCode::Enter);
         assert!(
-            matches!(app.modal, Some(Modal::Confirm { ref args, .. }) if args == &["integrate", "--branch", "review", "second", "first", "--", "cargo", "argument with spaces", ""])
+            matches!(app.modal, Some(Modal::Confirm { ref args, .. }) if args == &["integrate", "--branch", "review", "--workspace=second", "--workspace=first", "--", "cargo", "argument with spaces", ""])
         );
         app.modal_key(KeyCode::Esc);
         assert!(!app.mutating);
