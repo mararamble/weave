@@ -265,7 +265,8 @@ fn pieces(patch: &[u8]) -> (Vec<Vec<u8>>, &'static str) {
 impl Engine {
     pub(crate) fn capture(name: &str, include_untracked_content: bool) -> Result<Self> {
         let record = workspace::get(name)?;
-        crate::git_process::ensure_no_filters(Path::new(&record.path))?;
+        crate::git_process::ensure_no_filters(Path::new(&record.path))
+            .with_context(|| format!("Untangle cannot capture workspace {name}"))?;
         let before = index_bytes(name)?;
         let context = changeset::collect(name, include_untracked_content)?;
         let temp = isolated::temporary_repository()?;
@@ -418,7 +419,8 @@ impl Engine {
     pub(crate) fn verify_source(&self) -> Result<()> {
         let name = &self.snapshot.context.name;
         let record = workspace::get(name)?;
-        crate::git_process::ensure_no_filters(Path::new(&record.path))?;
+        crate::git_process::ensure_no_filters(Path::new(&record.path))
+            .with_context(|| format!("Untangle cannot revalidate workspace {name}"))?;
         let before = index_bytes(name)?;
         let now = changeset::collect(name, self.include_untracked_content)?;
         let commit = isolated::snapshot(self.temp.path(), &now)?;

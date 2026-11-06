@@ -254,7 +254,7 @@ fn inspect(name: &str) -> Result<Checked> {
         bail!("Workspace HEAD changed during inspection");
     }
     let tracked = inspect_index(&path)?;
-    git_process::ensure_no_filters(&path)?;
+    git_process::ensure_no_filters(&path).context("Removal cannot verify workspace safety")?;
     let status = output_at(
         &path,
         &[

@@ -449,6 +449,10 @@ fn preview_reports_filter_origin_without_executing_filter() {
     terminal.send(b"p");
     terminal.wait_for("filter.danger.clean");
     assert!(!marker.exists());
+    terminal.send(b"c");
+    terminal.wait_for("Reconciliation cannot inspect workspace task");
+    terminal.wait_for("Reconciliation complete");
+    assert!(!marker.exists());
     terminal.send(b"qq");
     terminal.finish();
 }

@@ -149,6 +149,15 @@ pub(crate) fn command_at(path: &std::path::Path) -> Command {
 
 /// Git status may run active clean/process filters; refuse before inspection.
 pub(crate) fn ensure_no_filters(path: &std::path::Path) -> anyhow::Result<()> {
+    inspect_filters(path).with_context(|| {
+        format!(
+            "Filter safety check refused inspection of {}. From that workspace, inspect definitions with `git config --show-origin --get-regexp '^filter\\..*\\.(clean|process)$'`, then inspect each effective value with `git config --show-origin --get '<key>'`. Definitions can be overridden; only non-empty effective clean/process values block inspection. Configuration is repository-specific: review it with the repository owner before changing it; do not disable Git LFS indiscriminately. Weave did not change configuration or run filters. See docs/git-filter-safety.md",
+            crate::tui::safe(&path.to_string_lossy())
+        )
+    })
+}
+
+fn inspect_filters(path: &std::path::Path) -> anyhow::Result<()> {
     use anyhow::bail;
     const FILTER_PATTERN: &str = r"^filter\..*\.(clean|process)$";
 
@@ -208,19 +217,13 @@ pub(crate) fn ensure_no_filters(path: &std::path::Path) -> anyhow::Result<()> {
             if active.is_empty() {
                 return Ok(());
             }
-            let entries: String = active
-                .join("\n")
-                .chars()
-                .map(|c| {
-                    if c.is_control() && c != '\n' && c != '\t' {
-                        '?'
-                    } else {
-                        c
-                    }
-                })
-                .collect();
+            let entries = active
+                .iter()
+                .map(|s| crate::tui::safe(s))
+                .collect::<Vec<_>>()
+                .join("; ");
             bail!(
-                "effective Git clean/process filters prevent safe inspection: {}. Inspect each effective value with `git config --show-origin --get '<key>'`; review or remove the configuration only if appropriate, then retry. Weave will not run these filters.",
+                "effective Git clean/process filters prevent safe inspection: {}. Weave will not run these filters.",
                 entries
             );
         }

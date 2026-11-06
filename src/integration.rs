@@ -467,7 +467,8 @@ fn prepare(names: &[String], include_untracked_content: bool) -> Result<Prepared
 }
 
 pub(crate) fn show(names: &[String], json: bool, include_untracked_content: bool) -> Result<()> {
-    let prepared = prepare(names, include_untracked_content)?;
+    let prepared = prepare(names, include_untracked_content)
+        .context("Planning cannot inspect the selected workspaces")?;
     // The owned candidate and snapshot IDs remain available to future consumers
     // until the temporary object database is dropped.
     let _candidate = (&prepared.candidate_commit, &prepared.snapshots);
@@ -710,7 +711,8 @@ pub(crate) fn integrate(
             String::from_utf8_lossy(&exists.stderr)
         ),
     }
-    let prepared = prepare(names, include_untracked_content)?;
+    let prepared = prepare(names, include_untracked_content)
+        .context("Integration cannot prepare the selected workspaces")?;
     if prepared.report.status != "clean" {
         let details = prepared
             .report

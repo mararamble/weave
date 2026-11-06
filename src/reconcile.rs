@@ -17,6 +17,9 @@ struct Managed {
     unstaged: Option<usize>,
     untracked: Option<usize>,
     ignored: Option<usize>,
+    // Human diagnostics deliberately do not extend the schema-v1 contract.
+    #[serde(skip)]
+    diagnostics: Vec<String>,
 }
 #[derive(Serialize)]
 struct Unknown {
@@ -87,6 +90,7 @@ fn inventory() -> Result<Inventory> {
         for (path, record) in &records {
             let p = Path::new(&record.path);
             let mut states = Vec::new();
+            let mut diagnostics = Vec::new();
             let (mut staged, mut unstaged, mut untracked, mut ignored) = (None, None, None, None);
             let expected_file = format!("{}.json", record.name);
             if record.schema_version != 1
@@ -191,16 +195,23 @@ fn inventory() -> Result<Inventory> {
                             None
                         };
                         let out = if identity_valid && index.is_some() {
-                            git_process::ensure_no_filters(p).and_then(|_| {
-                                git_process::output(git_process::command_at(p).args([
-                                    "status",
-                                    "--porcelain=v1",
-                                    "-z",
-                                    "--untracked-files=all",
-                                    "--ignored=matching",
-                                    "--ignore-submodules=none",
-                                ]))
-                            })
+                            git_process::ensure_no_filters(p)
+                                .inspect_err(|error| {
+                                    diagnostics.push(format!(
+                                        "Reconciliation cannot inspect workspace {}: {error:#}",
+                                        record.name
+                                    ));
+                                })
+                                .and_then(|_| {
+                                    git_process::output(git_process::command_at(p).args([
+                                        "status",
+                                        "--porcelain=v1",
+                                        "-z",
+                                        "--untracked-files=all",
+                                        "--ignored=matching",
+                                        "--ignore-submodules=none",
+                                    ]))
+                                })
                         } else {
                             Err(anyhow::anyhow!("Identity inspection failed"))
                         };
@@ -248,6 +259,7 @@ fn inventory() -> Result<Inventory> {
                 record: path.to_string_lossy().into_owned(),
                 registration: registered,
                 states,
+                diagnostics,
                 moved_candidates,
                 staged,
                 unstaged,
@@ -301,6 +313,9 @@ pub(crate) fn preview(name: &str) -> Result<()> {
     for candidate in &item.moved_candidates {
         humanln!("Possible moved worktree: {candidate}");
     }
+    for diagnostic in &item.diagnostics {
+        humanln!("Inspection: {diagnostic}");
+    }
     humanln!("No operations will be performed while this target is blocked.");
     Ok(())
 }
@@ -321,6 +336,9 @@ pub(crate) fn show(json: bool) -> Result<()> {
             );
             for candidate in &item.moved_candidates {
                 humanln!("  possible moved worktree: {candidate}");
+            }
+            for diagnostic in &item.diagnostics {
+                humanln!("  inspection: {diagnostic}");
             }
         }
         for item in &inventory.unknown {

@@ -367,7 +367,7 @@ impl App {
                                 None
                             }
                             "reconcile" => {
-                                self.start(vec!["reconcile".into(), "--json".into()], 3);
+                                self.text_command(vec!["reconcile".into()], "Reconciliation");
                                 None
                             }
                             "preview" => {
@@ -1061,7 +1061,9 @@ pub(crate) fn run(include_untracked_content: bool) -> Result<()> {
                     }
                     KeyCode::Char('r') => app.refresh(),
                     KeyCode::Char('s') => app.start(vec!["status".into(), "--json".into()], 3),
-                    KeyCode::Char('c') => app.start(vec!["reconcile".into(), "--json".into()], 3),
+                    KeyCode::Char('c') => {
+                        app.text_command(vec!["reconcile".into()], "Reconciliation")
+                    }
                     KeyCode::Char('w') => app.show_workspace(),
                     KeyCode::Char('o') => app.review(false),
                     KeyCode::Char('p') => app.review(true),
