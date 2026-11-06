@@ -472,10 +472,10 @@ weave status --json
 Fields include:
 
 - `schema_version`
-- `repository_root`
-- `worktree_path`
+- `repository_root` — current worktree root (the historical v1 name)
+- `worktree_path` — same current worktree root
 - `git_dir`
-- `common_dir`
+- `common_dir` — shared Git metadata, not a primary worktree root
 - `branch`
 - `detached_head`
 - `unborn`
@@ -694,7 +694,7 @@ Missing workspaces and failed Git operations produce errors instead of partial s
 
 CI uses the current stable Rust toolchain on Linux and macOS; the crate uses Rust edition 2024. Run `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings` from this directory. Tests use disposable repositories and explicit branch names. Some macOS filesystems reject non-UTF-8 filenames, so the filesystem-specific test skips when the OS reports that limitation; byte-level parser coverage still runs.
 
-Status reads NUL-delimited Git output as bytes and rejects malformed or truncated records. On Unix, repository paths can contain non-UTF-8 bytes, with lossy display indicated by `paths_lossy`; managed workspace metadata still requires UTF-8 paths. Other platforms use lossy conversion for Git paths. Git requirements for integration planning are described above; other Git capability and helper-execution safeguards are still being audited.
+[Status path semantics](docs/status-paths.md) preserve the schema-v1 meanings. Status reads NUL-delimited Git output as bytes and rejects malformed or truncated records. On Unix, repository paths can contain non-UTF-8 bytes, with lossy display indicated by `paths_lossy`; managed workspace metadata still requires UTF-8 paths. Other platforms use lossy conversion for Git paths. Git requirements for integration planning are described above; other Git capability and helper-execution safeguards are still being audited.
 
 ## Worktree reconciliation and removal
 
@@ -714,6 +714,7 @@ Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and
 |---|---|---|
 | 01 | Repository discovery | Implemented |
 | 02 | Managed worktrees, reconciliation and confirmed removal (new workspaces default outside Git metadata) | Implemented, verification pending: safety review; hosted CI passed for cbba825 |
+| WEV-44 | Status path semantics | Documents existing v1 fields; primary/linked/nested/separate-directory and unavailable/lossy fixtures; required macOS checks passed; Linux pending acceptance |
 | WEV-43 | Uninspectable workspace listing | Retains v1 fail-hard output; failed TUI refresh clears cached selections; required macOS checks passed; Linux pending acceptance |
 | WEV-42 | Actionable Git-filter refusals | Operation context, human/TUI reconciliation diagnostics and v1/source-preservation regressions implemented; required macOS checks passed; Linux unverified |
 | WEV-41 | Leading-hyphen workspace names | CLI/TUI implementation and regression coverage; Linux execution remains an open verification gate |
