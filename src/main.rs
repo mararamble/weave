@@ -32,6 +32,7 @@ mod integration;
 mod overlap;
 mod provenance_cli;
 mod reconcile;
+mod remote;
 mod removal;
 mod tui;
 mod tui_process;
@@ -57,6 +58,8 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
+    /// Register SSH profiles and inspect remote Git metadata without mutation
+    Remote(remote::Options),
     /// Explicit opt-in provenance checkpoints, deterministic replay and storage maintenance
     Provenance(provenance_cli::Options),
     /// Untangle a workspace by grouping and validating changes without modifying it
@@ -370,6 +373,7 @@ fn main() -> std::process::ExitCode {
 
 fn run(command: Option<Commands>) -> Result<()> {
     match command {
+        Some(Commands::Remote(options)) => remote::run(options)?,
         None => tui::run(false)?,
         Some(Commands::Untangle(options)) => untangle::show(options)?,
         Some(Commands::Provenance(options)) => provenance_cli::run(options)?,

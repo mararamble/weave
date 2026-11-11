@@ -708,6 +708,24 @@ Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and
 
 ---
 
+## SSH remote discovery
+
+Register an existing OpenSSH alias with permitted absolute search roots:
+
+```sh
+weave remote add workstation my-ssh-alias --root=/home/me/projects
+weave remote check workstation --json
+weave remote discover workstation --json
+```
+
+Verify the host fingerprint independently and configure OpenSSH `known_hosts`
+first. Weave refuses unknown or changed keys and never adds trust. Profiles are
+stored privately in the user config directory. The stdin-only Python 3.9+ helper
+reads Git metadata without invoking remote Git or writing remote files; it does
+not collect dirty content or transfer objects. Bounded discovery reports partial
+results explicitly. See [SSH profiles and discovery](docs/ssh-remotes.md) for
+commands, JSON v1, path rules, timeouts, limits and platform verification gaps.
+
 ## Roadmap
 
 | Phase | Focus | Status |
@@ -728,7 +746,7 @@ Git must support `status --porcelain=v1 -z`, `worktree list --porcelain -z`, and
 | 06c | Optional provenance (WEV-19) | [Event contract](docs/provenance.md) integrated with explicit capture, storage and replay below; no hidden monitoring or built-in trusted agent hook. Independent audit and macOS checks passed; Linux verification pending |
 | 06d | Append-only provenance collector (WEV-38) | Opt-in filtered checkpoints, serialized/idempotent writes, bounded blobs/journal, explicit recovery and confirmed orphan pruning implemented; independent audit and macOS checks passed; Linux verification pending |
 | 06e | Provenance replay (WEV-39) | Deterministic report, fixed checksum fixture, hash/order/snapshot-reference validation, corrections and conservative hunk reconciliation implemented; authenticated actor integration is an explicit embedding API. Independent audit and macOS checks passed; Linux verification pending |
-| 07 | SSH remote linking | Planned |
+| 07 | SSH remote linking (WEV-20) | CLI profiles, strict existing host trust and read-only metadata discovery implemented; macOS and localhost SSH verification recorded in [SSH docs](docs/ssh-remotes.md); Mac–Linux acceptance pending (test host unreachable) |
 | 08 | Remote uncommitted snapshots | Planned |
 | 09 | Distributed integration | Planned |
 | 10 | Neovim and MCP integrations | Planned |
